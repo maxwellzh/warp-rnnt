@@ -27,9 +27,9 @@ extern "C"
                                       const int *xn, const int *yn, int N, int T, int U, float fastemit_lambda);
 
     rnntStatus_t run_warp_rnnt_compact(cudaStream_t stream, unsigned int *counts, float *alphas, float *betas,
-                                       const int *labels, const float *log_probs, float *grads, float *costs,
-                                       const int *xn, const int *yn, const int *memPref, const int *labelPref,
-                                       int N, int Tm, int Um, int V, int blank, float fastemit_lambda);
+                                       const unsigned int *labels, const float *log_probs, float *grads, float *costs,
+                                       const unsigned int *xn, const unsigned int *yn, const unsigned int *memPref, const unsigned int *labelPref,
+                                       unsigned int N, unsigned int Tm, unsigned int Um, unsigned int V, unsigned int blank, float fastemit_lambda);
 
     rnntStatus_t run_warp_rnnt_compact_gather(cudaStream_t stream, unsigned int *counts, float *alphas, float *betas,
                                               const float *log_probs, float *grads, float *costs,
@@ -47,6 +47,9 @@ extern "C"
 
     rnntStatus_t run_backward_compact(cudaStream_t stream, const float *grad_cost, float *grad,
                                       const unsigned int *cumSum, unsigned int STU, unsigned N, unsigned int V);
+    rnntStatus_t run_alphabeta_div_prob(cudaStream_t stream, float *alphabetas, const float *costs,
+                                       const unsigned int *xn, const unsigned int *yn, const unsigned int *memPref,
+                                       unsigned int N, unsigned int Tm, unsigned int Um);
 
 #ifdef __cplusplus
 }

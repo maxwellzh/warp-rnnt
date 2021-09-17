@@ -32,9 +32,10 @@ __forceinline__ __device__ static float log_sum_exp(float a, float b)
 }
 
 __device__ void kernel_warp_alphas_compact(unsigned int *counts, volatile float *alphas,
-                                           const int *labels, const float *log_probs,
-                                           const int *xn, const int *yn, const int *memPref, const int *labelPref,
-                                           int V, int blank)
+                                           const unsigned int *labels, const float *log_probs,
+                                           const unsigned int *xn, const unsigned int *yn,
+                                           const unsigned int *memPref, const unsigned int *labelPref,
+                                           unsigned int V, unsigned int blank)
 {
 
     unsigned int d = threadIdx.x;
@@ -47,8 +48,8 @@ __device__ void kernel_warp_alphas_compact(unsigned int *counts, volatile float 
     assert(d < W);
     assert(blockDim.x == W);
 
-    int actual_t = xn[n];
-    int actual_u = yn[n] + 1;
+    unsigned int actual_t = xn[n];
+    unsigned int actual_u = yn[n] + 1;
 
     if (t > actual_t || u > actual_u)
         return;
@@ -169,9 +170,10 @@ __device__ void kernel_warp_alphas_compact(unsigned int *counts, volatile float 
 }
 
 __device__ void kernel_warp_betas_compact(unsigned int *counts, volatile float *betas,
-                                          const int *labels, const float *log_probs,
-                                          const int *xn, const int *yn, const int *memPref, const int *labelPref,
-                                          int V, int blank)
+                                          const unsigned int *labels, const float *log_probs,
+                                          const unsigned int *xn, const unsigned int *yn,
+                                          const unsigned int *memPref, const unsigned int *labelPref,
+                                          unsigned int V, unsigned int blank)
 {
 
     unsigned int d = threadIdx.x;
@@ -184,14 +186,14 @@ __device__ void kernel_warp_betas_compact(unsigned int *counts, volatile float *
     assert(d < W);
     assert(blockDim.x == W);
 
-    int actual_t = xn[n];
-    int actual_u = yn[n] + 1;
+    unsigned int actual_t = xn[n];
+    unsigned int actual_u = yn[n] + 1;
 
     if (t > actual_t || u > actual_u)
         return;
 
-    int T1 = actual_t - 1;
-    int U1 = actual_u - 1;
+    unsigned int T1 = actual_t - 1;
+    unsigned int U1 = actual_u - 1;
     unsigned int mem_beg = memPref[n];
     unsigned int mem_loc = mem_beg / V;
 
@@ -306,9 +308,10 @@ __device__ void kernel_warp_betas_compact(unsigned int *counts, volatile float *
 }
 
 __global__ void kernel_warp_compact(unsigned int *counts, volatile float *alphas, volatile float *betas,
-                                    const int *labels, const float *log_probs,
-                                    const int *xn, const int *yn, const int *memPref, const int *labelPref,
-                                    int V, int blank)
+                                    const unsigned int *labels, const float *log_probs,
+                                    const unsigned int *xn, const unsigned int *yn,
+                                    const unsigned int *memPref, const unsigned int *labelPref,
+                                    unsigned int V, unsigned int blank)
 {
     if (threadIdx.y == 0)
     {
@@ -321,7 +324,8 @@ __global__ void kernel_warp_compact(unsigned int *counts, volatile float *alphas
 }
 
 __global__ void kernel_grads_blank_compact(float *grads, const float *alphas, const float *betas, const float *log_probs,
-                                           const int *xn, const int *yn, const int *memPref, int V, int blank)
+                                           const unsigned int *xn, const unsigned int *yn,
+                                           const unsigned int *memPref, unsigned int V, unsigned int blank)
 {
 
     unsigned int d = threadIdx.x;
@@ -333,8 +337,8 @@ __global__ void kernel_grads_blank_compact(float *grads, const float *alphas, co
     assert(d < G);
     assert(blockDim.x == G);
 
-    int actual_t = xn[n];
-    int actual_u = yn[n] + 1;
+    unsigned int actual_t = xn[n];
+    unsigned int actual_u = yn[n] + 1;
 
     if (t >= actual_t || u >= actual_u)
         return;
@@ -342,8 +346,8 @@ __global__ void kernel_grads_blank_compact(float *grads, const float *alphas, co
     if (t == actual_t - 1 && u < actual_u - 1)
         return;
 
-    int mem_beg = memPref[n];
-    int mem_loc = mem_beg / V;
+    unsigned int mem_beg = memPref[n];
+    unsigned int mem_loc = mem_beg / V;
     // a = alphas[n, t, u];
     float a = alphas[mem_loc + t * actual_u + u];
 
@@ -363,9 +367,10 @@ __global__ void kernel_grads_blank_compact(float *grads, const float *alphas, co
 }
 
 __global__ void kernel_grads_label_compact(float *grads, const float *alphas, const float *betas,
-                                           const int *labels, const float *log_probs,
-                                           const int *xn, const int *yn, const int *memPref, const int *labelPref,
-                                           int V, float fastemit_lambda)
+                                           const unsigned int *labels, const float *log_probs,
+                                           const unsigned int *xn, const unsigned int *yn,
+                                           const unsigned int *memPref, const unsigned int *labelPref,
+                                           unsigned int V, float fastemit_lambda)
 {
 
     unsigned int d = threadIdx.x;
@@ -377,8 +382,8 @@ __global__ void kernel_grads_label_compact(float *grads, const float *alphas, co
     assert(d < G);
     assert(blockDim.x == G);
 
-    int actual_t = xn[n];
-    int actual_u = yn[n];
+    unsigned int actual_t = xn[n];
+    unsigned int actual_u = yn[n];
 
     if (t >= actual_t || u >= actual_u)
         return;
@@ -407,8 +412,9 @@ __global__ void kernel_grads_label_compact(float *grads, const float *alphas, co
 }
 
 __global__ void kernel_fill_costs_compact(float *costs, float *grads, const float *alphas, const float *betas, const float *log_probs,
-                                          const int *xn, const int *yn, const int *memPref,
-                                          int N, int V, int blank)
+                                          const unsigned int *xn, const unsigned int *yn,
+                                          const unsigned int *memPref,
+                                          unsigned int N, unsigned int V, unsigned int blank)
 {
 
     unsigned int n = blockIdx.x * blockDim.x + threadIdx.x;
@@ -416,8 +422,8 @@ __global__ void kernel_fill_costs_compact(float *costs, float *grads, const floa
     if (n >= N)
         return;
 
-    int t = xn[n] - 1;
-    int u = yn[n];
+    unsigned int t = xn[n] - 1;
+    unsigned int u = yn[n];
     unsigned int mem_beg = memPref[n];
     unsigned int mem_loc = mem_beg / V;
 
@@ -448,11 +454,11 @@ __global__ void kernel_fill_costs_compact(float *costs, float *grads, const floa
         // grads[n, 0, 0, 0]
         float *g = grads + mem_beg;
 
-        for (int i = 0; i < t + 1; ++i)
+        for (unsigned int i = 0; i < t + 1; ++i)
         {
-            for (int j = 0; j < u + 1; ++j)
+            for (unsigned int j = 0; j < u + 1; ++j)
             {
-                for (int v = 0; v < V; ++v, ++g)
+                for (unsigned int v = 0; v < V; ++v, ++g)
                 {
                     *g = 0.0f;
                 }
@@ -465,9 +471,9 @@ __global__ void kernel_fill_costs_compact(float *costs, float *grads, const floa
 }
 
 rnntStatus_t run_warp_rnnt_compact(cudaStream_t stream, unsigned int *counts, float *alphas, float *betas,
-                                   const int *labels, const float *log_probs, float *grads, float *costs,
-                                   const int *xn, const int *yn, const int *memPref, const int *labelPref,
-                                   int N, int Tm, int Um, int V, int blank, float fastemit_lambda)
+                                   const unsigned int *labels, const float *log_probs, float *grads, float *costs,
+                                   const unsigned int *xn, const unsigned int *yn, const unsigned int *memPref, const unsigned int *labelPref,
+                                   unsigned int N, unsigned int Tm, unsigned int Um, unsigned int V, unsigned int blank, float fastemit_lambda)
 {
 
     // counts: (2*\sum_{U_i+1},)
@@ -500,6 +506,32 @@ rnntStatus_t run_warp_rnnt_compact(cudaStream_t stream, unsigned int *counts, fl
     kernel_fill_costs_compact<<<blocks4, B, 0, stream>>>(costs, grads, alphas, betas, log_probs, xn, yn, memPref, N, V, blank);
     if (cudaGetLastError() != cudaSuccess)
         return RNNT_STATUS_COSTS_FAILED;
+
+    return RNNT_STATUS_SUCCESS;
+}
+
+__global__ void kernel_fill_fused(float *alphabetas, const float *costs,
+                                  const unsigned int *xn, const unsigned int *yn,
+                                  const unsigned int *memPref)
+{
+    unsigned int t = blockIdx.x * G + threadIdx.x;
+    unsigned int n = blockIdx.z;
+    unsigned int u = blockIdx.y;
+    if (t >= xn[n] || u >= yn[n] + 1)
+        return;
+
+    alphabetas[memPref[n] + t * (yn[n] + 1) + u] += costs[n];
+}
+
+rnntStatus_t run_alphabeta_div_prob(cudaStream_t stream, float *alphabetas, const float *costs,
+                                    const unsigned int *xn, const unsigned int *yn, const unsigned int *memPref,
+                                    unsigned int N, unsigned int Tm, unsigned int Um)
+{
+
+    dim3 blocks2((Tm + G - 1) / G, Um, N);
+    kernel_fill_fused<<<blocks2, G, 0, stream>>>(alphabetas, costs, xn, yn, memPref);
+    if (cudaGetLastError() != cudaSuccess)
+        return RNNT_STATUS_GRADS_LABEL_FAILED;
 
     return RNNT_STATUS_SUCCESS;
 }

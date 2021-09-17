@@ -1,18 +1,19 @@
 
-result=BenchMarkResults.txt
+# result=FusedBenchMarkResults.txt
 
-if [ -f $result ]; then
-    echo "$result file exists."
-    exit 0
-fi
+# if [ -f $result ]; then
+#     echo "$result file exists."
+#     exit 0
+# fi
 
-mkdir .benchmarktmp
+mkdir -p .benchmarktmp
 cp benchmark.py .benchmarktmp/
-for loss in warp-rnnt warp-rnnt-compact warp-rnnt-gather warp-rnnt-gather-compact; do
+for loss in warp-rnnt-compact warp-rnnt-gather-compact warp-rnnt-fused-compact; do
     echo $loss
-    CUDA_VISIBLE_DEVICES=8 python .benchmarktmp/benchmark.py \
+    CUDA_VISIBLE_DEVICES=1 python .benchmarktmp/benchmark.py \
         --loss=$loss || exit 1
     echo ""
-done > $result
+done 
+# > $result
 
 /bin/rm -r .benchmarktmp/

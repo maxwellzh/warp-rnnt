@@ -227,6 +227,79 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, int> rnnt_loss_compact_f
     }
 }
 
+// return (costs, grad)
+std::tuple<torch::Tensor, torch::Tensor> rnnt_loss_fused_forward(
+    torch::Tensor &xs, const torch::Tensor &ys,
+    const torch::Tensor &xn, const torch::Tensor &yn,
+    const int blank)
+{
+    const auto N = xn.size(0);
+    const auto Tm = xn.max().item<int64_t>();     // max of {T_i}
+    const auto Um = yn.max().item<int64_t>() + 1; // max of {U_i}
+    const auto V = xs.size(1);
+
+    auto memPref = (xn * (yn + 1)).cumsum(0, at::ScalarType::Int); // count of frames by current batch
+    auto labelPref = yn.cumsum(0, at::ScalarType::Int);            // copy yn
+
+    int64_t STU = memPref[-1].item<int64_t>();
+    TORCH_CHECK(xs.size(0) == STU, "xs shape mismatch with (\\sum{xn*(yn+1)}, )")
+
+    // set begin of memory location of each sequence
+    {
+        auto cumsumMemPref = memPref.index({Slice(0, -1, None)}).clone();
+        auto cumsumLablePref = labelPref.index({Slice(0, -1, None)}).clone();
+        memPref.index_put_({Slice(1, None, None)}, cumsumMemPref);
+        labelPref.index_put_({Slice(1, None, None)}, cumsumLablePref);
+    }
+    memPref[0] = 0;
+    const auto Offset = memPref * V;
+    labelPref[0] = 0;
+
+    // x -= c, c = max(x)
+    xs -= xs.max();
+    // log_softmax(x) = x - c - log(sum(exp(x-c)))
+    const auto summed = torch::logsumexp(xs, -1, true); // shape (STU, )
+    xs -= summed;
+
+    const auto device = xs.device();
+    // the negtive log likelihood
+    torch::Tensor costs = torch::empty({N}, torch::dtype(torch::kFloat32).device(device));
+    //  for maintain the execute status of forward/backward calculation
+    torch::Tensor counts = torch::zeros({ys.numel() * 2 + 2 * N}, torch::dtype(torch::kInt32).device(device));
+    // forward variable of RNN-T
+    torch::Tensor alphas = torch::empty({STU}, torch::dtype(torch::kFloat32).device(device));
+    // backward variable of RNN-T
+    torch::Tensor betas = torch::empty_like(alphas);
+    torch::Tensor grads = torch::zeros_like(xs);
+
+    auto stream = c10::cuda::getCurrentCUDAStream(device.index());
+
+    rnntStatus_t status;
+
+    status = run_warp_rnnt_compact(stream,
+                                   (unsigned int *)counts.data_ptr<int>(),
+                                   alphas.data_ptr<float>(), betas.data_ptr<float>(),
+                                   (unsigned int *)ys.data_ptr<int>(), xs.data_ptr<float>(),
+                                   grads.data_ptr<float>(), costs.data_ptr<float>(),
+                                   (unsigned int *)xn.data_ptr<int>(), (unsigned int *)yn.data_ptr<int>(),
+                                   (unsigned int *)Offset.data_ptr<int>(), (unsigned int *)labelPref.data_ptr<int>(),
+                                   N, Tm, Um, V, blank, 0.0f);
+    TORCH_CHECK(status == RNNT_STATUS_SUCCESS, "rnnt_loss fused status " + std::to_string(status));
+
+    alphas += betas;
+    status = run_alphabeta_div_prob(stream, alphas.data_ptr<float>(), costs.data_ptr<float>(),
+                                    (unsigned int *)xn.data_ptr<int>(), (unsigned int *)yn.data_ptr<int>(),
+                                    (unsigned int *)memPref.data_ptr<int>(), N, Tm, Um);
+    TORCH_CHECK(status == RNNT_STATUS_SUCCESS, "rnnt_loss fused status " + std::to_string(status));
+
+    xs += alphas.view({STU, 1});
+    xs = torch::exp_(xs);
+    grads += xs;
+
+    // non gather mode, only (costs, grad) is useful.
+    return std::make_tuple(costs, grads);
+}
+
 torch::Tensor rnnt_loss_compact_backward(
     const torch::Tensor &grad_cost, torch::Tensor &grad, const torch::Tensor &cumSum,
     const torch::Tensor &loc, long V, int blank)
@@ -315,4 +388,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
         pybind11::arg("loc"),
         pybind11::arg("V"),
         pybind11::arg("blank"));
+
+    m.def(
+        "rnnt_loss_fused_forward",
+        &rnnt_loss_fused_forward,
+        "CUDA-Warp RNN-Transducer loss with fused operations",
+        pybind11::arg("xs"),
+        pybind11::arg("ys"),
+        pybind11::arg("xn"),
+        pybind11::arg("yn"),
+        pybind11::arg("blank") = 0);
 }

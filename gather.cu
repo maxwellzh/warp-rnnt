@@ -7,7 +7,7 @@
 #include <device_atomic_functions.h>
 #include <device_launch_parameters.h>
 
-#define WLL 1024
+#define G 1024
 #define WL 512
 #define W 64
 #define H 16

@@ -1,7 +1,7 @@
 import torch
-import numpy as np
+import time
 import warp_rnnt._C as core
-from warp_rnnt import rnnt_loss
+from warp_rnnt import rnnt_loss, fused_rnnt_loss
 
 
 xs = torch.tensor([], dtype=torch.float32)
@@ -143,6 +143,7 @@ def test_compute():
         xs.grad = None
 
         _xs, _ys = compactTensor(xs, ys, xn, yn)
+
         t_cost = rnnt_loss(_xs, _ys, xn, yn, gather=True, compact=True)
         t_cost.sum().backward()
         t_grad = xs.grad.data.detach()
@@ -154,6 +155,85 @@ def test_compute():
             torch.all(m_cost == t_cost).item(), torch.all(m_grad == t_grad).item()))
 
 
+def test_fusion_compute(minicase=False):
+
+    NTest = 1 if minicase else 5
+
+    for seed in range(NTest):
+        torch.manual_seed(seed)
+        if minicase:
+            N = torch.randint(2, 4, (1,)).item()
+            T = torch.randint(4, 8, (1,)).item()
+            U = torch.randint(4, 8, (1,)).item()
+            V = torch.randint(3, 5, (1,)).item()
+            N, T, U, V = 2, 3, 3, 3
+        else:
+            N = torch.randint(2, 8, (1,)).item()
+            T = torch.randint(16, 512, (1,)).item()
+            U = torch.randint(16, 512, (1,)).item()
+            V = torch.randint(10, 128, (1,)).item()
+
+        xs = torch.randn((N, T, U, V), dtype=torch.float32, device=0)
+        ys = torch.randint(1, V, (N, U-1), dtype=torch.int, device=0)
+        xn = torch.randint(T // 2, T+1, (N,), dtype=torch.int, device=0)
+        yn = torch.randint(U // 2, U, (N,), dtype=torch.int, device=0)
+        xn = xn + T - xn.max()
+        yn = yn + U-1 - yn.max()
+
+        ys = ys.to(dtype=torch.int)
+        xn, yn = xn.to(dtype=torch.int, device=0), yn.to(
+            dtype=torch.int, device=0)
+        print("xs size: ", xs.size())
+        print("ys size: ", ys.size())
+        print("lx size: ", xn.size())
+        print("ly size: ", yn.size())
+        xs, ys = compactTensor(xs, ys, xn, yn)
+
+        xs.requires_grad = True
+        weighted = torch.randn((N, ), device=xs.device, dtype=xs.dtype)
+        torch.cuda.reset_peak_memory_stats()
+
+        time_beg = time.time()
+        t_cost = rnnt_loss(xs.log_softmax(dim=-1), ys, xn,
+                           yn, gather=True, compact=True)
+        (t_cost*weighted).sum().backward()
+        t_grad = xs.grad.data.detach()
+        t_dur = time.time() - time_beg
+        xs.grad = None
+        t_mem = torch.cuda.max_memory_allocated()
+
+        torch.cuda.reset_peak_memory_stats()
+
+        time_beg = time.time()
+        l_cost = fused_rnnt_loss(xs, ys, xn, yn)
+        (l_cost*weighted).sum().backward()
+        l_grad = xs.grad.data.detach()
+        l_dur = time.time() - time_beg
+        xs.grad = None
+        l_mem = torch.cuda.max_memory_allocated()
+        del xs
+
+        print("{} run: fused mode: time={:.3f}ms | memory={:.0f}MB".format(
+            seed, l_dur*1000, l_mem/1e6))
+        print("{} run: native mode: time={:.3f}ms | memory={:.0f}MB".format(
+            seed, t_dur*1000, t_mem/1e6))
+
+        match_backward = torch.abs(l_grad-t_grad)
+        print("Forward | backward 1st-order norm: {:.3e} | {:.3e}, max diff={:.3e}".format(torch.sum(
+            torch.abs(l_cost-t_cost)).item(), torch.sum(match_backward).item(), match_backward.max().item()))
+
+        if match_backward.max().item() > 1.0:
+            print(weighted)
+            print(l_grad[match_backward > 1.0])
+            print(t_grad[match_backward > 1.0])
+            break
+        if minicase:
+            print("Fused costs; ", l_cost.cpu().tolist())
+            print("Compact costs; ", t_cost.cpu().tolist())
+            print(l_grad-t_grad)
+
+
 if __name__ == "__main__":
     # test_compute()
-    test_calls()
+    # test_calls()
+    test_fusion_compute(minicase=False)

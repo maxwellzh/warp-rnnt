@@ -78,7 +78,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(
         description="Benchmark RNN-T loss implementation")
-    parser.add_argument("--loss", type=str, required=True,
+    parser.add_argument("--loss", type=str, required=True, choices=['warp-rnnt', 'warp-rnnt-gather', 'warp-rnnt-compact', 'warp-rnnt-gather-compact', 'warp-rnnt-fused-compact', 'warprnnt_pytorch', 'Transducer'],
                         help="The target implementation")
     parser.add_argument("--device", type=str, required=False,
                         help="The target implementation", default="cuda")
@@ -111,6 +111,12 @@ if __name__ == "__main__":
         def run_loss(xs, ys, xn, yn):
             return rnnt_loss(F.log_softmax(xs, -1), ys, xn, yn, gather=True, compact=True)
 
+    elif args.loss == "warp-rnnt-fused-compact":
+        from warp_rnnt import fused_rnnt_loss
+
+        def run_loss(xs, ys, xn, yn):
+            return fused_rnnt_loss(xs, ys, xn, yn)
+
     elif args.loss == "warprnnt_pytorch":
         from warprnnt_pytorch import rnnt_loss
 
@@ -128,9 +134,6 @@ if __name__ == "__main__":
 # (100, 150, 40, 28), (50, 150, 20, 5000), (10, 1500, 300, 50), (10, 400, 100, 1024)
     for E, T, U, V in [(100, 150, 40, 28), (50, 150, 20, 5000), (10, 1500, 300, 50), (10, 400, 100, 1024)]:
         for N in [1, 16, 32, 64, 128]:
-            if (E, T, U, V, N) in [(10, 1500, 300, 50, 128), (10, 400, 100, 1024, 128)]:
-                torch.cuda.reset_peak_memory_stats()
-                continue
             print(f"T={T}\tU={U}\tV={V}\tN={N}\t", end="")
             try:
                 time = run_benchmark(
