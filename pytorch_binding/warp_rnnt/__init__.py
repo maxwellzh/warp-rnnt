@@ -186,7 +186,7 @@ def fused_rnnt_loss(logits: torch.FloatTensor,
     assert logits.dim(
     ) == 2, f"Logits should be of shape (Stu, V), instead of {logits.size()}"
     assert labels.dim(
-    ) == 1, f"Labels should be of shape (Su, ), instead of {labels.size()}"
+    ) == 2, f"Labels should be of shape (Su, 1), instead of {labels.size()}"
     assert frames_lengths.dim() == 1
     assert labels_lengths.dim() == 1
     assert frames_lengths.size(0) == labels_lengths.size(0)
