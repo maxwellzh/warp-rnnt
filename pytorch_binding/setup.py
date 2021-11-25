@@ -27,11 +27,11 @@ long_description = get_long_description()
 
 setup(
     name="warp_rnnt",
-    version="0.7.0",
+    version="0.7.1",
     description="PyTorch bindings for CUDA-Warp RNN-Transducer",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/1ytic/warp-rnnt/tree/master/pytorch_binding",
+    url="https://github.com/maxwellzh/warp-rnnt/tree/dev/pytorch_binding",
     author="Ivan Sorokin",
     author_email="sorokin.ivan@inbox.ru",
     license="MIT",

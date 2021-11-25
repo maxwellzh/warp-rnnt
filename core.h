@@ -48,8 +48,13 @@ extern "C"
     rnntStatus_t run_backward_compact(cudaStream_t stream, const float *grad_cost, float *grad,
                                       const unsigned int *cumSum, unsigned int STU, unsigned N, unsigned int V);
     rnntStatus_t run_alphabeta_div_prob(cudaStream_t stream, float *alphabetas, const float *costs,
-                                       const unsigned int *xn, const unsigned int *yn, const unsigned int *memPref,
-                                       unsigned int N, unsigned int Tm, unsigned int Um);
+                                        const unsigned int *xn, const unsigned int *yn, const unsigned int *memPref,
+                                        unsigned int N, unsigned int Tm, unsigned int Um);
+
+    rnntStatus_t run_rnnt_cost_cal_compact(cudaStream_t stream, unsigned int *counts, float *alphas,
+                                           const unsigned int *labels, const float *log_probs, float *costs,
+                                           const unsigned int *xn, const unsigned int *yn, const unsigned int *memPref, const unsigned int *labelPref,
+                                           unsigned int N, unsigned int Tm, unsigned int Um, unsigned int V, unsigned int blank);
 
 #ifdef __cplusplus
 }

@@ -117,10 +117,10 @@ std::tuple<at::Tensor, at::Tensor> rnnt_loss(
 }
 
 // return (costs, grad, loc, blank)
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, int> rnnt_loss_compact_forward(
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> rnnt_loss_compact_forward(
     const torch::Tensor &xs, const torch::Tensor &ys,
     const torch::Tensor &xn, const torch::Tensor &yn,
-    const int blank, const float fastemit_lambda)
+    const int blank, const float fastemit_lambda, const bool require_grad)
 {
     // Check contiguous
     CHECK_CONTIGUOUS(xs);
@@ -177,8 +177,14 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, int> rnnt_loss_compact_f
     auto stream = c10::cuda::getCurrentCUDAStream(device.index());
 
     rnntStatus_t status;
+    int modified_blank = blank;
+    if (!require_grad && modified_blank < 0)
+    {
+        // For better efficiency, gather is not required, if we don't need to compute gradients.
+        modified_blank = (-1) - blank;
+    }
 
-    if (blank < 0)
+    if (modified_blank < 0)
     {
         // gather mode
         int real_blank = (-1) - blank;
@@ -204,26 +210,45 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, int> rnnt_loss_compact_f
                                               (unsigned int *)xn.data_ptr<int>(), (unsigned int *)yn.data_ptr<int>(),
                                               (unsigned int *)memPref.data_ptr<int>(), (unsigned int *)labelPref.data_ptr<int>(),
                                               N, Tm, Um, fastemit_lambda);
-        TORCH_CHECK(status == RNNT_STATUS_SUCCESS, "rnnt_loss status " + std::to_string(status));
+        TORCH_CHECK(status == RNNT_STATUS_SUCCESS, "rnnt loss compact status " + std::to_string(status));
 
-        return std::make_tuple(costs, grads, loc, blank);
+        return std::make_tuple(costs, grads, loc);
     }
     else
     {
-        grads = torch::zeros_like(xs);
         memPref *= V;
-        status = run_warp_rnnt_compact(stream,
-                                       (unsigned int *)counts.data_ptr<int>(),
-                                       alphas.data_ptr<float>(), betas.data_ptr<float>(),
-                                       (unsigned int *)ys.data_ptr<int>(), xs.data_ptr<float>(),
-                                       grads.data_ptr<float>(), costs.data_ptr<float>(),
-                                       (unsigned int *)xn.data_ptr<int>(), (unsigned int *)yn.data_ptr<int>(),
-                                       (unsigned int *)memPref.data_ptr<int>(), (unsigned int *)labelPref.data_ptr<int>(),
-                                       N, Tm, Um, V, blank, fastemit_lambda);
-        TORCH_CHECK(status == RNNT_STATUS_SUCCESS, "rnnt_loss status " + std::to_string(status));
+        if (require_grad)
+        {
 
-        // non gather mode, only (costs, grad) is useful.
-        return std::make_tuple(costs, grads, grads, blank);
+            grads = torch::zeros_like(xs);
+            status = run_warp_rnnt_compact(stream,
+                                           (unsigned int *)counts.data_ptr<int>(),
+                                           alphas.data_ptr<float>(), betas.data_ptr<float>(),
+                                           (unsigned int *)ys.data_ptr<int>(), xs.data_ptr<float>(),
+                                           grads.data_ptr<float>(), costs.data_ptr<float>(),
+                                           (unsigned int *)xn.data_ptr<int>(), (unsigned int *)yn.data_ptr<int>(),
+                                           (unsigned int *)memPref.data_ptr<int>(), (unsigned int *)labelPref.data_ptr<int>(),
+                                           N, Tm, Um, V, blank, fastemit_lambda);
+            TORCH_CHECK(status == RNNT_STATUS_SUCCESS, "rnnt loss compact status" + std::to_string(status));
+
+            // non-gather mode, only (costs, grad) is useful.
+            return std::make_tuple(costs, grads, grads);
+        }
+        else
+        {
+            status = run_rnnt_cost_cal_compact(stream,
+                                               (unsigned int *)counts.data_ptr<int>(),
+                                               alphas.data_ptr<float>(),
+                                               (unsigned int *)ys.data_ptr<int>(), xs.data_ptr<float>(),
+                                               costs.data_ptr<float>(),
+                                               (unsigned int *)xn.data_ptr<int>(), (unsigned int *)yn.data_ptr<int>(),
+                                               (unsigned int *)memPref.data_ptr<int>(), (unsigned int *)labelPref.data_ptr<int>(),
+                                               N, Tm, Um, V, modified_blank);
+            TORCH_CHECK(status == RNNT_STATUS_SUCCESS, "rnnt loss compact status" + std::to_string(status));
+
+            // non-gather mode, only (costs, ) is useful.
+            return std::make_tuple(costs, costs, costs);
+        }
     }
 }
 
@@ -231,7 +256,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, int> rnnt_loss_compact_f
 std::tuple<torch::Tensor, torch::Tensor> rnnt_loss_fused_forward(
     torch::Tensor &xs, const torch::Tensor &ys,
     const torch::Tensor &xn, const torch::Tensor &yn,
-    const int blank)
+    const int blank, const bool require_grad)
 {
     const auto N = xn.size(0);
     const auto Tm = xn.max().item<int64_t>();     // max of {T_i}
@@ -268,36 +293,52 @@ std::tuple<torch::Tensor, torch::Tensor> rnnt_loss_fused_forward(
     torch::Tensor counts = torch::zeros({ys.numel() * 2 + 2 * N}, torch::dtype(torch::kInt32).device(device));
     // forward variable of RNN-T
     torch::Tensor alphas = torch::empty({STU}, torch::dtype(torch::kFloat32).device(device));
-    // backward variable of RNN-T
-    torch::Tensor betas = torch::empty_like(alphas);
-    torch::Tensor grads = torch::zeros_like(xs);
 
     auto stream = c10::cuda::getCurrentCUDAStream(device.index());
-
     rnntStatus_t status;
+    if (require_grad)
+    {
+        // backward variable of RNN-T
+        torch::Tensor betas = torch::empty_like(alphas);
+        torch::Tensor grads = torch::zeros_like(xs);
 
-    status = run_warp_rnnt_compact(stream,
-                                   (unsigned int *)counts.data_ptr<int>(),
-                                   alphas.data_ptr<float>(), betas.data_ptr<float>(),
-                                   (unsigned int *)ys.data_ptr<int>(), xs.data_ptr<float>(),
-                                   grads.data_ptr<float>(), costs.data_ptr<float>(),
-                                   (unsigned int *)xn.data_ptr<int>(), (unsigned int *)yn.data_ptr<int>(),
-                                   (unsigned int *)Offset.data_ptr<int>(), (unsigned int *)labelPref.data_ptr<int>(),
-                                   N, Tm, Um, V, blank, 0.0f);
-    TORCH_CHECK(status == RNNT_STATUS_SUCCESS, "rnnt_loss fused status " + std::to_string(status));
+        status = run_warp_rnnt_compact(stream,
+                                       (unsigned int *)counts.data_ptr<int>(),
+                                       alphas.data_ptr<float>(), betas.data_ptr<float>(),
+                                       (unsigned int *)ys.data_ptr<int>(), xs.data_ptr<float>(),
+                                       grads.data_ptr<float>(), costs.data_ptr<float>(),
+                                       (unsigned int *)xn.data_ptr<int>(), (unsigned int *)yn.data_ptr<int>(),
+                                       (unsigned int *)Offset.data_ptr<int>(), (unsigned int *)labelPref.data_ptr<int>(),
+                                       N, Tm, Um, V, blank, 0.0f);
+        TORCH_CHECK(status == RNNT_STATUS_SUCCESS, "rnnt_loss fused status " + std::to_string(status));
 
-    alphas += betas;
-    status = run_alphabeta_div_prob(stream, alphas.data_ptr<float>(), costs.data_ptr<float>(),
-                                    (unsigned int *)xn.data_ptr<int>(), (unsigned int *)yn.data_ptr<int>(),
-                                    (unsigned int *)memPref.data_ptr<int>(), N, Tm, Um);
-    TORCH_CHECK(status == RNNT_STATUS_SUCCESS, "rnnt_loss fused status " + std::to_string(status));
+        alphas += betas;
+        status = run_alphabeta_div_prob(stream, alphas.data_ptr<float>(), costs.data_ptr<float>(),
+                                        (unsigned int *)xn.data_ptr<int>(), (unsigned int *)yn.data_ptr<int>(),
+                                        (unsigned int *)memPref.data_ptr<int>(), N, Tm, Um);
+        TORCH_CHECK(status == RNNT_STATUS_SUCCESS, "rnnt_loss fused status " + std::to_string(status));
 
-    xs += alphas.view({STU, 1});
-    xs = torch::exp_(xs);
-    grads += xs;
+        xs += alphas.view({STU, 1});
+        xs = torch::exp_(xs);
+        grads += xs;
 
-    // non gather mode, only (costs, grad) is useful.
-    return std::make_tuple(costs, grads);
+        // non gather mode, only (costs, grad) is useful.
+        return std::make_tuple(costs, grads);
+    }
+    else
+    {
+        status = run_rnnt_cost_cal_compact(stream,
+                                           (unsigned int *)counts.data_ptr<int>(),
+                                           alphas.data_ptr<float>(),
+                                           (unsigned int *)ys.data_ptr<int>(), xs.data_ptr<float>(),
+                                           costs.data_ptr<float>(),
+                                           (unsigned int *)xn.data_ptr<int>(), (unsigned int *)yn.data_ptr<int>(),
+                                           (unsigned int *)Offset.data_ptr<int>(), (unsigned int *)labelPref.data_ptr<int>(),
+                                           N, Tm, Um, V, blank);
+        TORCH_CHECK(status == RNNT_STATUS_SUCCESS, "rnnt_loss fused status " + std::to_string(status));
+
+        return std::make_tuple(costs, costs);
+    }
 }
 
 torch::Tensor rnnt_loss_compact_backward(
@@ -376,7 +417,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
         pybind11::arg("xn"),
         pybind11::arg("yn"),
         pybind11::arg("blank") = 0,
-        pybind11::arg("fastemit_lambda") = 0.0);
+        pybind11::arg("fastemit_lambda") = 0.0,
+        pybind11::arg("require_grad") = true);
 
     m.def(
         "rnnt_loss_compact_backward",
@@ -397,5 +439,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
         pybind11::arg("ys"),
         pybind11::arg("xn"),
         pybind11::arg("yn"),
-        pybind11::arg("blank") = 0);
+        pybind11::arg("blank") = 0,
+        pybind11::arg("require_grad") = true);
 }

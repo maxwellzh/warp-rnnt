@@ -1,4 +1,5 @@
 import argparse
+import os
 
 import torch
 import torch.nn.functional as F
@@ -23,7 +24,7 @@ def compactTensor(xs: torch.Tensor, ys: torch.Tensor, xn: torch.Tensor, yn: torc
     return _xs, _ys
 
 
-def run_benchmark(loss, E, N, T, U, V, random_length=False, device="cuda", compact=False):
+def run_benchmark(loss, E, N, T, U, V, random_length=False, compact=False):
 
     torch.manual_seed(N)
 
@@ -32,11 +33,12 @@ def run_benchmark(loss, E, N, T, U, V, random_length=False, device="cuda", compa
     for i in range(E):
 
         xs = torch.randn((N, T, U, V), dtype=torch.float32,
-                         device=0, requires_grad=True)
+                         device=0)
         ys = torch.randint(1, V, (N, U-1), dtype=torch.int, device=0)
 
         if random_length:
-            xn = torch.randint(T // 2, T+1, (N,), dtype=torch.int, device=0)
+            xn = torch.randint(T // 2, T+1, (N,),
+                               dtype=torch.int, device=0)
             yn = torch.randint(U // 2, U, (N,), dtype=torch.int, device=0)
             xn = xn + T - xn.max()
             yn = yn + U-1 - yn.max()
@@ -47,29 +49,22 @@ def run_benchmark(loss, E, N, T, U, V, random_length=False, device="cuda", compa
         if compact:
             with torch.no_grad():
                 xs, ys = compactTensor(xs, ys, xn, yn)
-            xs.requires_grad = True
+        xs.requires_grad = False
 
-        if device == "cuda":
-            xs = xs.cuda()
-            ys = ys.cuda()
-            xn = xn.cuda()
-            yn = yn.cuda()
-            torch.cuda.synchronize()  # sync before start the timer
+        torch.cuda.synchronize()  # sync before start the timer
 
         t = timer()
 
         costs = loss(xs, ys, xn, yn)
-        costs.mean().backward()
+        # costs.mean().backward()
 
-        if device == "cuda":
-            torch.cuda.synchronize()  # sync before stop the timer
+        torch.cuda.synchronize()  # sync before stop the timer
 
         elapsed_time += timer() - t
 
         del xs, ys, xn, yn, costs
 
-        if device == "cuda":
-            torch.cuda.empty_cache()
+        torch.cuda.empty_cache()
 
     return elapsed_time * 1000 / E
 
@@ -80,12 +75,13 @@ if __name__ == "__main__":
         description="Benchmark RNN-T loss implementation")
     parser.add_argument("--loss", type=str, required=True, choices=['warp-rnnt', 'warp-rnnt-gather', 'warp-rnnt-compact', 'warp-rnnt-gather-compact', 'warp-rnnt-fused-compact', 'warprnnt_pytorch', 'Transducer'],
                         help="The target implementation")
-    parser.add_argument("--device", type=str, required=False,
-                        help="The target implementation", default="cuda")
+    parser.add_argument("--device", type=int, required=False,
+                        help="The target device (GPU id)", default=0)
     parser.add_argument("--random_length", type=bool,
                         required=False, help="The random length", default=True)
 
     args = parser.parse_args()
+    os.environ['CUDA_VISIBLE_DEVICES'] = str(args.device)
 
     if args.loss == "warp-rnnt":
         from warp_rnnt import rnnt_loss
@@ -144,7 +140,6 @@ if __name__ == "__main__":
                     U=U,
                     V=V,
                     random_length=args.random_length,
-                    device=args.device,
                     compact=args.loss.split('-')[-1] == 'compact'
                 )
                 print(

@@ -1,7 +1,7 @@
 import torch
 import time
 import warp_rnnt._C as core
-from warp_rnnt import rnnt_loss, fused_rnnt_loss
+from warp_rnnt import rnnt_loss, fused_rnnt_loss, fused_rnnt_loss_
 
 
 xs = torch.tensor([], dtype=torch.float32)
@@ -60,14 +60,6 @@ def test_calls():
         xs = torch.randn(((xn*(yn+1)).sum(), v), dtype=torch.float32,
                          device=0).log_softmax(dim=-1)
 
-        # xn = torch.tensor([2], dtype=torch.int, device=0)
-        # yn = torch.tensor([1], dtype=torch.int, device=0)
-        # xs = torch.tensor([[-1.6230, -0.8267, -1.0073],
-        #                    [-1.3808, -2.7746, -0.3765],
-        #                    [-2.2364, -0.6881, -0.9399],
-        #                    [-0.5337, -1.5759, -1.5763]], dtype=torch.float32, device=0)
-        # ys = torch.tensor([1], dtype=torch.int, device=0)
-
         cumSum = torch.cumsum(xn * (yn+1), dim=0)
         _costs, _grads, _, _ = core.rnnt_loss_compact_forward(xs, ys, xn, yn)
         real_grads = core.rnnt_loss_compact_backward(torch.ones_like(_costs),
@@ -92,8 +84,6 @@ def test_calls():
 
         cnt += torch.all(real_grads == real_grads_gather)
 
-        # xs.requires_grad = False
-        # xs, ys = reverseCompact(xs, ys, xn, yn)
         xs.requires_grad = True
         torch.autograd.gradcheck(
             rnnt_loss, (xs, ys, xn, yn, False, 'mean', 0, False, 0.0, True))
@@ -120,14 +110,6 @@ def test_compute():
         xn = xn + T - xn.max()
         yn = yn + U-1 - yn.max()
 
-        # print("{0} Test loaded sample {0}".format("="*10))
-        # checkpoint = torch.load(
-        #     'CheckForTestRNNT.pt', map_location='cuda:0')
-        # xs, ys, xn, yn = tuple(checkpoint.values())
-        # xs.requires_grad = False
-        # ys.requires_grad = False
-        # xs, ys = reverseCompact(xs, ys, xn, yn)
-
         ys = ys.to(dtype=torch.int)
         xn, yn = xn.to(dtype=torch.int, device=0), yn.to(
             dtype=torch.int, device=0)
@@ -153,6 +135,58 @@ def test_compute():
 
         print("correctness: forward | backward : {} | {}\n".format(
             torch.all(m_cost == t_cost).item(), torch.all(m_grad == t_grad).item()))
+
+
+def test_compact_no_grad(N: int = 3):
+
+    minicase = True
+    if minicase:
+        NTest = 1
+    else:
+        NTest = N
+
+    for seed in range(NTest):
+        torch.manual_seed(seed)
+        if minicase:
+            N = torch.randint(2, 4, (1,)).item()
+            T = torch.randint(4, 8, (1,)).item()
+            U = torch.randint(4, 8, (1,)).item()
+            V = torch.randint(3, 5, (1,)).item()
+            N, T, U, V = 2, 3, 3, 3
+        else:
+            N = torch.randint(1, 20, (1,)).item()
+            T = torch.randint(5, 512, (1,)).item()
+            U = torch.randint(1, 512, (1,)).item()
+            V = torch.randint(3, 128, (1,)).item()
+
+        xs = torch.randn((N, T, U, V), dtype=torch.float32,
+                         device=0).log_softmax(dim=-1)
+        ys = torch.randint(1, V, (N, U-1), dtype=torch.int, device=0)
+        xn = torch.randint(T // 2, T+1, (N,), dtype=torch.int, device=0)
+        yn = torch.randint(U // 2, U, (N,), dtype=torch.int, device=0)
+        xn = xn + T - xn.max()
+        yn = yn + U-1 - yn.max()
+
+        ys = ys.to(dtype=torch.int)
+        xn, yn = xn.to(dtype=torch.int, device=0), yn.to(
+            dtype=torch.int, device=0)
+        print("xs size: ", xs.size())
+        print("ys size: ", ys.size())
+        print("lx size: ", xn.size())
+        print("ly size: ", yn.size())
+
+        xs, ys = compactTensor(xs, ys, xn, yn)
+
+        for g in [True, False]:
+            xs.requires_grad = True
+            cost = rnnt_loss(xs, ys, xn, yn, gather=g, compact=True)
+            print(
+                "(gather={}, compact={}), cost w/ grad record\n{}".format(g, True, cost))
+
+            xs.requires_grad = False
+            cost = rnnt_loss(xs, ys, xn, yn, gather=g, compact=True)
+            print(
+                "(gather={}, compact={}), cost w/o grad record\n{}".format(g, True, cost))
 
 
 def test_fusion_compute(minicase=False):
@@ -205,7 +239,7 @@ def test_fusion_compute(minicase=False):
         torch.cuda.reset_peak_memory_stats()
 
         time_beg = time.time()
-        l_cost = fused_rnnt_loss(xs, ys, xn, yn)
+        l_cost = fused_rnnt_loss_(xs, ys, xn, yn)
         (l_cost*weighted).sum().backward()
         l_grad = xs.grad.data.detach()
         l_dur = time.time() - time_beg
@@ -233,7 +267,107 @@ def test_fusion_compute(minicase=False):
             print(l_grad-t_grad)
 
 
+def test_fusion_no_grad(minicase=False):
+
+    NTest = 1 if minicase else 5
+
+    for seed in range(NTest):
+        torch.manual_seed(seed)
+        if minicase:
+            N = torch.randint(2, 4, (1,)).item()
+            T = torch.randint(4, 8, (1,)).item()
+            U = torch.randint(4, 8, (1,)).item()
+            V = torch.randint(3, 5, (1,)).item()
+        else:
+            N = torch.randint(2, 8, (1,)).item()
+            T = torch.randint(16, 512, (1,)).item()
+            U = torch.randint(16, 512, (1,)).item()
+            V = torch.randint(10, 128, (1,)).item()
+
+        xs = torch.randn((N, T, U, V), dtype=torch.float32, device=0)
+        ys = torch.randint(1, V, (N, U-1), dtype=torch.int, device=0)
+        xn = torch.randint(T // 2, T+1, (N,), dtype=torch.int, device=0)
+        yn = torch.randint(U // 2, U, (N,), dtype=torch.int, device=0)
+        xn = xn + T - xn.max()
+        yn = yn + U-1 - yn.max()
+
+        ys = ys.to(dtype=torch.int)
+        xn, yn = xn.to(dtype=torch.int, device=0), yn.to(
+            dtype=torch.int, device=0)
+        print("xs size: ", xs.size())
+        print("ys size: ", ys.size())
+        print("lx size: ", xn.size())
+        print("ly size: ", yn.size())
+        xs, ys = compactTensor(xs, ys, xn, yn)
+
+        xs.requires_grad = True
+        l_cost_grad = fused_rnnt_loss(xs, ys, xn, yn)
+        xs.grad = None
+        xs.requires_grad = False
+        l_cost = fused_rnnt_loss(xs, ys, xn, yn)
+        print("Cost w/ gradient enable:\n{}".format(l_cost_grad))
+        print("Cost w/o gradient:\n{}".format(l_cost))
+        xs.requires_grad = True
+        with torch.no_grad():
+            l_cost = fused_rnnt_loss(xs, ys, xn, yn)
+            print("Cost w/o gradient via torch.no_grad():\n{}".format(l_cost))
+
+
+def test_bench_fusion():
+    torch.manual_seed(0)
+
+    N = torch.randint(2, 8, (1,)).item()
+    T = torch.randint(16, 512, (1,)).item()
+    U = torch.randint(16, 512, (1,)).item()
+    V = torch.randint(10, 128, (1,)).item()
+    xs = torch.randn((N, T, U, V), dtype=torch.float32, device=0)
+    ys = torch.randint(1, V, (N, U-1), dtype=torch.int, device=0)
+    xn = torch.randint(T // 2, T+1, (N,), dtype=torch.int, device=0)
+    yn = torch.randint(U // 2, U, (N,), dtype=torch.int, device=0)
+    xn = xn + T - xn.max()
+    yn = yn + U-1 - yn.max()
+    ys = ys.to(dtype=torch.int)
+    xn, yn = xn.to(dtype=torch.int, device=0), yn.to(
+        dtype=torch.int, device=0)
+    xs, ys = compactTensor(xs, ys, xn, yn)
+
+    t_beg = time.time()
+    costs_grad = []
+    xs.requires_grad = True
+    for i in range(100):
+        _cost = fused_rnnt_loss(xs, ys, xn, yn)
+        costs_grad.append(_cost.sum().item())
+
+    t_dur_grad = time.time() - t_beg
+
+    t_beg = time.time()
+    costs_nograd = []
+    xs.requires_grad = False
+    for i in range(100):
+        torch.manual_seed(i)
+        _cost = fused_rnnt_loss(xs, ys, xn, yn)
+        costs_nograd.append(_cost.sum().item())
+
+    t_dur_nograd = time.time() - t_beg
+
+    print(
+        "Time (ms): w/ | w/o grad = {:.2f} | {:.2f} ".format(t_dur_grad*10, t_dur_nograd*10))
+
+    for cg, cng in zip(costs_grad[:10], costs_nograd[:10]):
+        print(f"{cg:<10.2f}  {cng:<10.2f}")
+
+
 if __name__ == "__main__":
-    # test_compute()
-    # test_calls()
-    test_fusion_compute(minicase=False)
+    try:
+        test_compute()
+        test_fusion_compute(minicase=True)
+        test_fusion_no_grad(minicase=True)
+        test_compact_no_grad(1)
+
+        test_fusion_compute(minicase=False)
+        test_fusion_no_grad(minicase=False)
+        test_compact_no_grad(10)
+
+        test_bench_fusion()
+    except Exception as e:
+        print(e)

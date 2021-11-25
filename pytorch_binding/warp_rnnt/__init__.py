@@ -28,15 +28,18 @@ class RNNTLossCompact(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, log_probs, labels, frames_lengths, labels_lengths, blank=0, fastemit_lambda=0.0):
-        costs, grads, loc, ctx.blank = core.rnnt_loss_compact_forward(
+        ctx.blank = blank
+        costs, grads, loc = core.rnnt_loss_compact_forward(
             xs=log_probs, ys=labels,
             xn=frames_lengths, yn=labels_lengths,
             blank=blank,
             fastemit_lambda=fastemit_lambda,
+            require_grad=log_probs.requires_grad
         )
-        expand_len = (frames_lengths * (labels_lengths+1))
-        ctx.V = log_probs.size(-1)
-        ctx.save_for_backward(grads, loc, expand_len)
+        if log_probs.requires_grad:
+            expand_len = (frames_lengths * (labels_lengths+1))
+            ctx.V = log_probs.size(-1)
+            ctx.save_for_backward(grads, loc, expand_len)
         return costs
 
     @staticmethod
@@ -65,15 +68,17 @@ class RNNTLossFusion(torch.autograd.Function):
                 "Fusion with gather=True is not implemented.")
         else:
             ctx.blank = blank
+
         costs, grads = core.rnnt_loss_fused_forward(
             xs=logits, ys=labels,
             xn=frames_lengths, yn=labels_lengths,
-            blank=blank
+            blank=blank, require_grad=logits.requires_grad
         )
+        if logits.requires_grad:
+            expand_len = (frames_lengths * (labels_lengths+1))
+            ctx.V = logits.size(-1)
+            ctx.save_for_backward(grads, expand_len)
 
-        expand_len = (frames_lengths * (labels_lengths+1))
-        ctx.V = logits.size(-1)
-        ctx.save_for_backward(grads, expand_len)
         return costs
 
     @staticmethod
@@ -174,6 +179,18 @@ def fused_rnnt_loss(logits: torch.FloatTensor,
                     average_frames: bool = False,
                     reduction: Optional[AnyStr] = None,
                     blank: int = 0) -> torch.Tensor:
+    logit_clone = logits.clone()
+    return fused_rnnt_loss_(logit_clone, labels, frames_lengths, labels_lengths, average_frames,
+                            reduction, blank)
+
+
+def fused_rnnt_loss_(logits: torch.FloatTensor,
+                     labels: torch.IntTensor,
+                     frames_lengths: torch.IntTensor,
+                     labels_lengths: torch.IntTensor,
+                     average_frames: bool = False,
+                     reduction: Optional[AnyStr] = None,
+                     blank: int = 0) -> torch.Tensor:
 
     assert average_frames is None or isinstance(average_frames, bool)
     assert reduction is None or reduction in ("none", "mean", "sum")
@@ -185,8 +202,13 @@ def fused_rnnt_loss(logits: torch.FloatTensor,
 
     assert logits.dim(
     ) == 2, f"Logits should be of shape (Stu, V), instead of {logits.size()}"
-    assert labels.dim(
-    ) == 2, f"Labels should be of shape (Su, 1), instead of {labels.size()}"
+    if labels.dim() == 2:
+        assert labels.size(
+            1) == 1, f"Labels should be of size (Su, 1) of (Su,), instead of {labels.size()}"
+    elif labels.dim() != 1:
+        raise RuntimeError(
+            f"Labels should be of size (Su, 1) of (Su,), instead of {labels.size()}")
+
     assert frames_lengths.dim() == 1
     assert labels_lengths.dim() == 1
     assert frames_lengths.size(0) == labels_lengths.size(0)
@@ -196,7 +218,7 @@ def fused_rnnt_loss(logits: torch.FloatTensor,
 
     if average_frames:
         costs = costs / frames_lengths.to(logits)
-    if reduction is None:
+    if reduction == "none" or reduction is None:
         return costs
     elif reduction == "sum":
         return costs.sum()
@@ -204,4 +226,4 @@ def fused_rnnt_loss(logits: torch.FloatTensor,
         return costs.mean()
     else:
         raise ValueError(
-            f"Unknown reduction method: {reduction}, expected to be one of ['mean', 'sum', None]")
+            f"Unknown reduction method: {reduction}, expected to be one of ['mean', 'sum', 'none']")

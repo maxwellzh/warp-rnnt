@@ -307,6 +307,15 @@ __device__ void kernel_warp_betas_compact(unsigned int *counts, volatile float *
     }
 }
 
+__global__ void kernel_alpha_only(unsigned int *counts, volatile float *alphas,
+                                  const unsigned int *labels, const float *log_probs,
+                                  const unsigned int *xn, const unsigned int *yn,
+                                  const unsigned int *memPref, const unsigned int *labelPref,
+                                  unsigned int V, unsigned int blank)
+{
+    kernel_warp_alphas_compact(counts, alphas, labels, log_probs, xn, yn, memPref, labelPref, V, blank);
+}
+
 __global__ void kernel_warp_compact(unsigned int *counts, volatile float *alphas, volatile float *betas,
                                     const unsigned int *labels, const float *log_probs,
                                     const unsigned int *xn, const unsigned int *yn,
@@ -411,6 +420,27 @@ __global__ void kernel_grads_label_compact(float *grads, const float *alphas, co
     grads[index] = -a;
 }
 
+__global__ void kernel_fill_cost_with_alpha(float *costs, const float *alphas, const float *log_probs,
+                                            const unsigned int *xn, const unsigned int *yn,
+                                            const unsigned int *memPref,
+                                            unsigned int N, unsigned int V, unsigned int blank)
+{
+    unsigned int n = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (n >= N)
+        return;
+
+    unsigned int t = xn[n] - 1;
+    unsigned int u = yn[n];
+    unsigned int mem_beg = memPref[n];
+    unsigned int mem_loc = mem_beg / V;
+
+    // a = alphas[n, t, u] + log_probs[n, t, u, blank]
+    float a = alphas[mem_loc + t * (u + 1) + u] + log_probs[mem_beg + t * (u + 1) * V + u * V + blank];
+
+    costs[n] = -a;
+}
+
 __global__ void kernel_fill_costs_compact(float *costs, float *grads, const float *alphas, const float *betas, const float *log_probs,
                                           const unsigned int *xn, const unsigned int *yn,
                                           const unsigned int *memPref,
@@ -468,6 +498,26 @@ __global__ void kernel_fill_costs_compact(float *costs, float *grads, const floa
     }
 
     costs[n] = -b;
+}
+
+rnntStatus_t run_rnnt_cost_cal_compact(cudaStream_t stream, unsigned int *counts, float *alphas,
+                                       const unsigned int *labels, const float *log_probs, float *costs,
+                                       const unsigned int *xn, const unsigned int *yn, const unsigned int *memPref, const unsigned int *labelPref,
+                                       unsigned int N, unsigned int Tm, unsigned int Um, unsigned int V, unsigned int blank)
+{
+
+    dim3 threads1(W, 1);
+    dim3 blocks1((Tm + W - 1) / W, Um, N);
+    kernel_alpha_only<<<blocks1, threads1, 0, stream>>>(counts, alphas, labels, log_probs, xn, yn, memPref, labelPref, V, blank);
+    if (cudaGetLastError() != cudaSuccess)
+        return RNNT_STATUS_WARP_FAILED;
+
+    dim3 blocks4((N + B - 1) / B, 1, 1);
+    kernel_fill_cost_with_alpha<<<blocks4, B, 0, stream>>>(costs, alphas, log_probs, xn, yn, memPref, N, V, blank);
+    if (cudaGetLastError() != cudaSuccess)
+        return RNNT_STATUS_COSTS_FAILED;
+
+    return RNNT_STATUS_SUCCESS;
 }
 
 rnntStatus_t run_warp_rnnt_compact(cudaStream_t stream, unsigned int *counts, float *alphas, float *betas,
