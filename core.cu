@@ -349,7 +349,7 @@ void kernel_fill_costs(float *costs, float *grads, const float *alphas, const fl
 
     float ratio = fabsf(a - b) / fabsf(fmaxf(a, b));
 
-    if (ratio > 0.001) {
+    if (ratio > 0.01) {
 
         printf("\nWARNING: sample %d [%d, %d] has a forward/backward mismatch %f / %f\n",
                 n, t + 1, u, a, b);

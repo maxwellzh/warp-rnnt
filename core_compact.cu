@@ -475,7 +475,7 @@ __global__ void kernel_fill_costs_compact(float *costs, float *grads, const floa
     float ratio = fabsf(a - b) / fabsf(fmaxf(a, b));
 
     // FIXME (maxwellzh): I think the ratio in logarithm is too strict.
-    if (ratio > 0.001)
+    if (ratio > 0.01)
     {
 
         printf("\nWARNING: sample %d [%d, %d] has a forward/backward mismatch %f / %f\n",

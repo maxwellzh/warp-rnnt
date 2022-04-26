@@ -27,16 +27,17 @@ class RNNTLoss(torch.autograd.Function):
 class RNNTLossCompact(torch.autograd.Function):
 
     @staticmethod
-    def forward(ctx, log_probs, labels, frames_lengths, labels_lengths, blank=0, fastemit_lambda=0.0):
+    def forward(ctx, log_probs, labels, frames_lengths, labels_lengths, blank=0, fastemit_lambda=0.0, enable_grad: bool = True):
         ctx.blank = blank
+
         costs, grads, loc = core.rnnt_loss_compact_forward(
             xs=log_probs, ys=labels,
             xn=frames_lengths, yn=labels_lengths,
             blank=blank,
             fastemit_lambda=fastemit_lambda,
-            require_grad=log_probs.requires_grad
+            require_grad=enable_grad
         )
-        if log_probs.requires_grad:
+        if enable_grad:
             expand_len = (frames_lengths * (labels_lengths+1))
             ctx.V = log_probs.size(-1)
             ctx.save_for_backward(grads, loc, expand_len)
@@ -56,13 +57,13 @@ class RNNTLossCompact(torch.autograd.Function):
             grads *= expand_grads_output.view(-1, 1)
             grads_input = grads
 
-        return grads_input, None, None, None, None, None
+        return grads_input, None, None, None, None, None, None
 
 
 class RNNTLossFusion(torch.autograd.Function):
 
     @staticmethod
-    def forward(ctx, logits, labels, frames_lengths, labels_lengths, blank=0):
+    def forward(ctx, logits, labels, frames_lengths, labels_lengths, blank=0, enable_grad: bool = True):
         if blank < 0:
             raise NotImplementedError(
                 "Fusion with gather=True is not implemented.")
@@ -72,9 +73,9 @@ class RNNTLossFusion(torch.autograd.Function):
         costs, grads = core.rnnt_loss_fused_forward(
             xs=logits, ys=labels,
             xn=frames_lengths, yn=labels_lengths,
-            blank=blank, require_grad=logits.requires_grad
+            blank=blank, require_grad=enable_grad
         )
-        if logits.requires_grad:
+        if enable_grad:
             expand_len = (frames_lengths * (labels_lengths+1))
             ctx.V = logits.size(-1)
             ctx.save_for_backward(grads, expand_len)
@@ -89,7 +90,7 @@ class RNNTLossFusion(torch.autograd.Function):
             dim=0, index=torch.repeat_interleave(expand_len.to(dtype=torch.long)))
         grads *= expand_grads_output.view(-1, 1)
 
-        return grads, None, None, None, None
+        return grads, None, None, None, None, None
 
 
 def rnnt_loss(log_probs: torch.FloatTensor,
@@ -155,9 +156,10 @@ def rnnt_loss(log_probs: torch.FloatTensor,
 
             blank = -1
 
+    enable_grad = (log_probs.requires_grad and torch.is_grad_enabled())
     if compact:
         costs = RNNTLossCompact.apply(log_probs, labels, frames_lengths,
-                                      labels_lengths, blank, fastemit_lambda)
+                                      labels_lengths, blank, fastemit_lambda, enable_grad)
     else:
         costs = RNNTLoss.apply(log_probs, labels, frames_lengths,
                                labels_lengths, blank, fastemit_lambda)
@@ -214,7 +216,7 @@ def fused_rnnt_loss_(logits: torch.FloatTensor,
     assert frames_lengths.size(0) == labels_lengths.size(0)
 
     costs = RNNTLossFusion.apply(
-        logits, labels, frames_lengths, labels_lengths, blank)
+        logits, labels, frames_lengths, labels_lengths, blank, (log_probs.requires_grad and torch.is_grad_enabled()))
 
     if average_frames:
         costs = costs / frames_lengths.to(logits)
