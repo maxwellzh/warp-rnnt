@@ -216,7 +216,7 @@ def fused_rnnt_loss_(logits: torch.FloatTensor,
     assert frames_lengths.size(0) == labels_lengths.size(0)
 
     costs = RNNTLossFusion.apply(
-        logits, labels, frames_lengths, labels_lengths, blank, (log_probs.requires_grad and torch.is_grad_enabled()))
+        logits, labels, frames_lengths, labels_lengths, blank, (logits.requires_grad and torch.is_grad_enabled()))
 
     if average_frames:
         costs = costs / frames_lengths.to(logits)
