@@ -2,11 +2,12 @@ import torch
 import warp_rnnt._C as core
 from typing import Optional, AnyStr
 from pkg_resources import get_distribution
+from torch.cuda.amp import autocast
 
 __version__ = get_distribution('warp_rnnt').version
 
 
-class RNNTLoss(torch.autograd.Function):
+class _RNNTLoss(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, log_probs, labels, frames_lengths, labels_lengths, blank=0, fastemit_lambda=0.0):
@@ -24,7 +25,7 @@ class RNNTLoss(torch.autograd.Function):
         return ctx.grads.mul_(grads_output), None, None, None, None, None
 
 
-class RNNTLossCompact(torch.autograd.Function):
+class _RNNTLossCompact(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, log_probs, labels, frames_lengths, labels_lengths, blank=0, fastemit_lambda=0.0, enable_grad: bool = True):
@@ -60,7 +61,7 @@ class RNNTLossCompact(torch.autograd.Function):
         return grads_input, None, None, None, None, None, None
 
 
-class RNNTLossFusion(torch.autograd.Function):
+class _RNNTLossFusion(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, logits, labels, frames_lengths, labels_lengths, blank=0, enable_grad: bool = True):
@@ -157,12 +158,13 @@ def rnnt_loss(log_probs: torch.FloatTensor,
             blank = -1
 
     enable_grad = (log_probs.requires_grad and torch.is_grad_enabled())
-    if compact:
-        costs = RNNTLossCompact.apply(log_probs, labels, frames_lengths,
-                                      labels_lengths, blank, fastemit_lambda, enable_grad)
-    else:
-        costs = RNNTLoss.apply(log_probs, labels, frames_lengths,
-                               labels_lengths, blank, fastemit_lambda)
+    with autocast(enabled=False):
+        if compact:
+            costs = _RNNTLossCompact.apply(log_probs.float(), labels, frames_lengths,
+                                           labels_lengths, blank, fastemit_lambda, enable_grad)
+        else:
+            costs = _RNNTLoss.apply(log_probs.float(), labels, frames_lengths,
+                                    labels_lengths, blank, fastemit_lambda)
 
     if average_frames:
         costs = costs / frames_lengths.to(log_probs)
@@ -215,8 +217,9 @@ def fused_rnnt_loss_(logits: torch.FloatTensor,
     assert labels_lengths.dim() == 1
     assert frames_lengths.size(0) == labels_lengths.size(0)
 
-    costs = RNNTLossFusion.apply(
-        logits, labels, frames_lengths, labels_lengths, blank, (logits.requires_grad and torch.is_grad_enabled()))
+    with autocast(enabled=False):
+        costs = _RNNTLossFusion.apply(
+            logits.float(), labels, frames_lengths, labels_lengths, blank, (logits.requires_grad and torch.is_grad_enabled()))
 
     if average_frames:
         costs = costs / frames_lengths.to(logits)
