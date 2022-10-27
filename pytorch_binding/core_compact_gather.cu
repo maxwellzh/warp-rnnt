@@ -1,1 +1,0 @@
-../core_compact_gather.cu
