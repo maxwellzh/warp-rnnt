@@ -38,11 +38,12 @@ setup(
             name="warp_rnnt._C",
             sources=[
                 "csrc/binding.cpp",
+                "csrc/simple.cu",
+                "csrc/vanilla.cu",
+                "csrc/vanilla_compact.cu",
                 "csrc/gather.cu",
-                "csrc/core.cu",
-                "csrc/core_gather.cu",
-                "csrc/core_compact.cu",
-                "csrc/core_compact_gather.cu",
+                "csrc/gather_compact.cu",
+                "csrc/compact_collector.cu"
             ]
         )
     ],

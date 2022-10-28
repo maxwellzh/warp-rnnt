@@ -10,23 +10,6 @@ xn = torch.tensor([], dtype=torch.int)
 yn = torch.tensor([], dtype=torch.int)
 
 
-def compactTensor(xs: torch.Tensor, ys: torch.Tensor, xn: torch.Tensor, yn: torch.Tensor) -> Tuple[torch.FloatTensor, torch.FloatTensor]:
-
-    assert xs.dim() == 4
-    assert ys.dim() == 2
-
-    N, T, Up, V = xs.size()
-    assert ys.size() == (N, Up-1)
-    assert xn.size(0) == N
-    assert yn.size(0) == N
-
-    _ys = torch.cat([ys[i, :yn[i]] for i in range(N)])
-    _xs = [xs[i, :xn[i], :yn[i]+1, :].contiguous() for i in range(N)]
-    _xs = torch.cat([x.view(-1, V) for x in _xs], dim=0)
-
-    return _xs, _ys
-
-
 class RNNTLossTest(unittest.TestCase):
 
     def test_contiguous(self):

@@ -9,7 +9,7 @@ This is ported from Ivan Sorokin's [warp-rnnt](https://github.com/1ytic/warp-rnn
 
     AFAIK, this is first proposed in the original paper of rnn-t by Alex Graves ([paper](https://arxiv.org/pdf/1211.3711.pdf), Eq. 12-13). And there're already some efficient implementations: Awni Hannun's [transducer](https://github.com/awni/transducer) and Kaldi's [k2-fsa](https://k2-fsa.github.io/k2/python_api/api.html#rnnt-loss-simple).
     
-    However, here in my implementation, the essential difference is that we don't do the normalization (the denominator in Eq. 13 in Graves' paper). Note that without the normalization factor, the rnn-t loss is no more a negative log probability and boundless.
+    However, here in my implementation, the essential difference is that we don't do the normalization (the denominator in Eq. 13 in Graves' paper). Note that without the normalization factor, the rnn-t loss is no more a negative log probability and boundless. The most promising feature of "simple rnnt loss" is that the memory consumption is limited by `O(N*(T+U)*V)` instead of `O(N*T*U*V)` in the vanilla implementation.
 
 ## Usage
 
