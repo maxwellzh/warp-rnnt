@@ -17,9 +17,9 @@ Please refer to the python module entry: `warp_rnnt/__init__.py`
 
 ## Requirements
 
-- C++11 or C++14 compiler (tested with GCC 7.5).
+- C++14 compiler (tested with GCC 7.5).
 - Python: 3.5+ (tested with version 3.9).
-- [PyTorch](http://pytorch.org/) >= 1.0.0 (tested with version 1.12.1).
+- [PyTorch](http://pytorch.org/) >= 1.11.0 (tested with version 1.12.1).
 - [CUDA Toolkit](https://developer.nvidia.com/cuda-zone) (tested with version 11.5).
 
 

@@ -18,7 +18,7 @@ if not torch.cuda.is_available():
 requirements = [
     "pybind11",
     "numpy",
-    "torch>=1.0.0"
+    "torch>=1.11.0"
 ]
 long_description = get_long_description()
 

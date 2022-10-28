@@ -1,6 +1,6 @@
 import torch
 import warp_rnnt._C as core
-from typing import Optional, AnyStr
+from typing import *
 from pkg_resources import get_distribution
 from torch.cuda.amp import autocast
 
