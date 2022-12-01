@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 import warp_rnnt._C as core
 from typing import *
 from pkg_resources import get_distribution
@@ -281,40 +282,30 @@ def rnnt_loss_simple(
 
     N, T, V = f_enc.shape
     U = labels.shape[1]
-    blanks = labels.new_zeros(1, 1)
-    # gather the target label and the blank symbol
-    # after gathering:
-    #   y(n, t, u)   = f_enc(n, t, u+1) + g_pred(n, u, 1), 0 <= t < T, 0 <= u < U
-    #   blk(n, t, u) = f_enc(n, t, 0) + g_pred(n, u, 0),   0 <= t < T, 0 <= u <= U
-    ## (N, T, V) -> (N, T, 1+U)
-    f_enc = torch.gather(f_enc, dim=2, index=torch.cat(
-        (blanks.expand(N, -1), labels), dim=1).unsqueeze(1).expand(-1, T, -1))
-    ## (N, U+1, U) -> (N, U+1, 2), 0 for blank, 1 for label at the position
-    # fmt:off
-    g_pred = torch.gather(g_pred, dim=2, index=torch.cat(
-        (
-            # (N, U+1, 1)
-            blanks.unsqueeze(0).expand(N, U+1, -1), 
-            # (N, U+1, 1)
-            torch.cat(
-                (
-                    # (N, U)
-                    labels, 
-                    # (N, 1), this can be any token 0 <= and < V
-                    blanks.expand(N, -1)
-                ),
-                dim=1
-            ).unsqueeze(2)
-        ),
-        dim=2
-    ))
-    # fmt:on
+    """
+    gather the target label and the blank symbol
+    after gathering:
+      y(n, t, u)   = f_enc(n, t, u+1) + g_pred(n, u, 1), 0 <= t < T, 0 <= u < U
+      blk(n, t, u) = f_enc(n, t, 0) + g_pred(n, u, 0),   0 <= t < T, 0 <= u <= U
+    """
+    ## (N, T, V) -> (N, T, U)
+    f = torch.gather(f_enc, dim=2, index=labels.unsqueeze(1).expand(-1, T, -1))
+    ## (N, T, U) -> (N, T, 1+U)
+    f = torch.cat([f_enc[..., :1], f], dim=-1)
+
+    ## (N, U+1, V) -> (N, U+1, 1)
+    g = torch.gather(
+        g_pred, dim=2, index=# (N, U+1, 1), the padded value won't be used, any value is ok.
+        F.pad(labels, (0, 1), value=0).unsqueeze(2)
+    )
+    ## (N, U+1, 1) -> (N, U+1, 2)
+    g = torch.cat([g_pred[..., :1], g], dim=-1)
 
     with autocast(enabled=False):
         costs = _RNNTLossSimple.apply(
-            f_enc.float(), g_pred.float(), lf, ll,
-            f_enc.requires_grad and torch.is_grad_enabled(),
-            g_pred.requires_grad and torch.is_grad_enabled()
+            f.float(), g.float(), lf, ll,
+            f.requires_grad and torch.is_grad_enabled(),
+            g.requires_grad and torch.is_grad_enabled()
         )
     if reduction == "none" or reduction is None:
         return costs
