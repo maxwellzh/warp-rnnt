@@ -253,13 +253,7 @@ __global__ void kernel_warp_grad_f_label(volatile float *grad_f,
   grad_f += IDX3(n, t, u, T, U);
   if (u == 0) {
     // f[:, :, 0] is reserved for blank
-    if (t == lf[n] - 1) {
-      *grad_f =
-          -expf(LOG_PROB_BLANK(n, t, U - 1) + alphas[IDX3(n, t, U - 1, T, U)] +
-                -betas[IDX3(n, 0, 0, T, U)]);
-    } else {
-      *grad_f = -1.0f;
-    }
+    *grad_f = -1.0f;
   } else {
     // computing grad(n, t, u) for label
     u -= 1;

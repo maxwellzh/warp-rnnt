@@ -301,9 +301,17 @@ def rnnt_loss_simple(
     U = labels.shape[1]
 
     if normalize:
-        f_enc = f_enc - f_enc.max()
-        g_pred = g_pred - g_pred.max()
-        den = torch.einsum("ijk,ilk->ijl", f_enc.exp(), g_pred.exp()).log()
+        mf = torch.max(f_enc.detach(), dim=-1, keepdim=True)[0]
+        mg = torch.max(g_pred.detach(), dim=-1, keepdim=True)[0]
+
+        f_enc = f_enc - mf
+        g_pred = g_pred - mg
+
+        den = torch.einsum(
+            "ijk,ilk->ijl",
+            f_enc.exp(),
+            g_pred.exp()
+        ).log()
     else:
         den = None
 
@@ -320,7 +328,7 @@ def rnnt_loss_simple(
 
     # (N, U+1, V) -> (N, U+1, 1)
     g = torch.gather(
-        g_pred, dim=2, index=  # (N, U+1, 1), the padded value won't be used, any value is ok.
+        g_pred, dim=2, index=# (N, U+1, 1), the padded value won't be used, any value is ok.
         F.pad(labels, (0, 1), value=0).unsqueeze(2)
     )
     # (N, U+1, 1) -> (N, U+1, 2)
