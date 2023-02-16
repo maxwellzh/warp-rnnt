@@ -100,7 +100,7 @@ def rnnt_loss(log_probs: torch.FloatTensor,
               frames_lengths: torch.IntTensor,
               labels_lengths: torch.IntTensor,
               average_frames: bool = False,
-              reduction: Optional[AnyStr] = None,
+              reduction: Literal['sum', 'mean', 'none'] = 'mean',
               blank: int = 0,
               gather: bool = True,
               fastemit_lambda: float = 0.0,
@@ -237,26 +237,41 @@ def rnnt_loss_fused_(logits: torch.FloatTensor,
 class _RNNTLossSimple(torch.autograd.Function):
 
     @staticmethod
-    def forward(ctx, f, g, lf, ll, track_grad_f: bool = True, track_grad_g: bool = True):
-        costs, alphas, betas = core.rnnt_loss_simple_fwd(f, g, lf, ll)
+    def forward(ctx, f, g, lf, ll, track_grad_f: bool = True, track_grad_g: bool = True,  den: torch.Tensor = None):
+        if den is None:
+            den = torch.empty(1)
+
+        costs, alphas, betas = core.rnnt_loss_simple_fwd(f, g, den, lf, ll)
 
         grad_f = core.rnnt_loss_simple_bwd_f(
-            f, g, alphas, betas, lf, ll) if track_grad_f else None
+            f, g, den, alphas, betas, lf, ll) if track_grad_f else None
         grad_g = core.rnnt_loss_simple_bwd_g(
-            f, g, alphas, betas, lf, ll) if track_grad_g else None
-        ctx.save_for_backward(grad_f, grad_g)
+            f, g, den, alphas, betas, lf, ll) if track_grad_g else None
+
+        if den is not None and (track_grad_f or track_grad_g):
+            grad_den = core.rnnt_loss_simple_bwd_den(
+                f, g, den, alphas, betas, lf, ll)
+        else:
+            grad_den = None
+
+        ctx.save_for_backward(grad_f, grad_g, grad_den)
         return costs
 
     @staticmethod
     def backward(ctx, grad_costs):
         grad_costs = grad_costs.view(-1, 1, 1)
-        (grad_f, grad_g) = ctx.saved_tensors
+        grad_f, grad_g, grad_den = ctx.saved_tensors
+
         if grad_f is not None:
             grad_f *= grad_costs
 
         if grad_g is not None:
             grad_g *= grad_costs
-        return grad_f, grad_g, None, None, None, None
+
+        if grad_den is not None:
+            grad_den *= grad_costs
+
+        return grad_f, grad_g, None, None, None, None, grad_den
 
 
 def rnnt_loss_simple(
@@ -265,7 +280,8 @@ def rnnt_loss_simple(
         labels: torch.Tensor,
         lf: torch.Tensor,
         ll: torch.Tensor,
-        reduction: Literal['none', 'sum', 'mean'] = 'mean'):
+        reduction: Literal['none', 'sum', 'mean'] = 'mean',
+        normalize: bool = True):
     """CUDA-warp simple rnn-t loss with the joiner as an log-add op.
 
     Arguments:
@@ -274,6 +290,7 @@ def rnnt_loss_simple(
         labels: (N, U)      target label seqs
         lf:     (N, )       lengths of f_enc
         ll:     (N, )       lengths of labels
+        normalize (bool) : whether conduct log-softmax or not. If not, this would return non-normalized costs.
     """
     assert torch.all(ll > 0), f"get invalid lengths of labels (=0): {ll}"
     lf = lf.to(device=f_enc.device, dtype=torch.int32)
@@ -282,31 +299,41 @@ def rnnt_loss_simple(
 
     N, T, V = f_enc.shape
     U = labels.shape[1]
+
+    if normalize:
+        f_enc = f_enc - f_enc.max()
+        g_pred = g_pred - g_pred.max()
+        den = torch.einsum("ijk,ilk->ijl", f_enc.exp(), g_pred.exp()).log()
+    else:
+        den = None
+
     """
     gather the target label and the blank symbol
     after gathering:
       y(n, t, u)   = f_enc(n, t, u+1) + g_pred(n, u, 1), 0 <= t < T, 0 <= u < U
       blk(n, t, u) = f_enc(n, t, 0) + g_pred(n, u, 0),   0 <= t < T, 0 <= u <= U
     """
-    ## (N, T, V) -> (N, T, U)
+    # (N, T, V) -> (N, T, U)
     f = torch.gather(f_enc, dim=2, index=labels.unsqueeze(1).expand(-1, T, -1))
-    ## (N, T, U) -> (N, T, 1+U)
+    # (N, T, U) -> (N, T, 1+U)
     f = torch.cat([f_enc[..., :1], f], dim=-1)
 
-    ## (N, U+1, V) -> (N, U+1, 1)
+    # (N, U+1, V) -> (N, U+1, 1)
     g = torch.gather(
-        g_pred, dim=2, index=# (N, U+1, 1), the padded value won't be used, any value is ok.
+        g_pred, dim=2, index=  # (N, U+1, 1), the padded value won't be used, any value is ok.
         F.pad(labels, (0, 1), value=0).unsqueeze(2)
     )
-    ## (N, U+1, 1) -> (N, U+1, 2)
+    # (N, U+1, 1) -> (N, U+1, 2)
     g = torch.cat([g_pred[..., :1], g], dim=-1)
 
     with autocast(enabled=False):
         costs = _RNNTLossSimple.apply(
             f.float(), g.float(), lf, ll,
             f.requires_grad and torch.is_grad_enabled(),
-            g.requires_grad and torch.is_grad_enabled()
+            g.requires_grad and torch.is_grad_enabled(),
+            den
         )
+
     if reduction == "none" or reduction is None:
         return costs
     elif reduction == "sum":

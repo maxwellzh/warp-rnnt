@@ -68,16 +68,38 @@ void run_warp_rnnt_simple(unsigned int *counts, volatile float *alphas,
                           volatile float *betas, const float *f, const float *g,
                           const int *lf, const int *ly, unsigned int N,
                           unsigned int T, unsigned int U);
+void run_warp_rnnt_simple(unsigned int *counts, volatile float *alphas,
+                          volatile float *betas, const float *f, const float *g,
+                          const float *den, const int *lf, const int *ly,
+                          unsigned int N, unsigned int T, unsigned int U);
 
 void run_rnnt_simple_fill_grad_f(volatile float *grad_f, const float *alphas,
                                  const float *betas, const float *f,
                                  const float *g, const int *lf, const int *ly,
                                  unsigned int N, unsigned int T,
                                  unsigned int U);
+void run_rnnt_simple_fill_grad_f(volatile float *grad_f, const float *alphas,
+                                 const float *betas, const float *f,
+                                 const float *g, const float *den,
+                                 const int *lf, const int *ly, unsigned int N,
+                                 unsigned int T, unsigned int U);
 
 void run_rnnt_simple_fill_grad_g(volatile float *grad_f, unsigned int *counts,
                                  const float *alphas, const float *betas,
                                  const float *f, const float *g, const int *lf,
                                  const int *ly, unsigned int N, unsigned int T,
                                  unsigned int U);
+void run_rnnt_simple_fill_grad_g(volatile float *grad_f, unsigned int *counts,
+                                 const float *alphas, const float *betas,
+                                 const float *f, const float *g,
+                                 const float *den, const int *lf, const int *ly,
+                                 unsigned int N, unsigned int T,
+                                 unsigned int U);
+
+void run_rnnt_simple_fill_grad_den(volatile float *grad_den,
+                                   const float *alphas, const float *betas,
+                                   const float *f, const float *g,
+                                   const float *den, const int *lf,
+                                   const int *ly, unsigned int N,
+                                   unsigned int T, unsigned int U);
 #endif

@@ -14,11 +14,10 @@
 #define IDX3(n, t, u, D1, D2) (n) * (D1) * (D2) + (t) * (D2) + (u)
 
 #define LOG_PROB_BLANK(n, t, u)                                                \
-  (f[IDX3(n, t, 0, T, U)] + g[IDX3(n, u, 0, U, 2)] - den[IDX3(n, t, u, T, U)])
+  (f[IDX3(n, t, 0, T, U)] + g[IDX3(n, u, 0, U, 2)])
 
 #define LOG_PROB_Y(n, t, u)                                                    \
-  (f[IDX3(n, t, (u) + 1, T, U)] + g[IDX3(n, u, 1, U, 2)] -                     \
-   den[IDX3(n, t, u, T, U)])
+  (f[IDX3(n, t, (u) + 1, T, U)] + g[IDX3(n, u, 1, U, 2)])
 
 __forceinline__ __device__ static float logaddexpf(float a, float b) {
   float const tmp = a - b;
@@ -36,8 +35,7 @@ __forceinline__ __device__ static float logaddexpf(float a, float b) {
 
 __device__ void kernel_warp_alphas(unsigned int *counts, volatile float *alphas,
                                    const float *f, const float *g,
-                                   const float *den, const int *lf,
-                                   const int *ly, unsigned int T,
+                                   const int *lf, const int *ly, unsigned int T,
                                    unsigned int U) {
 
   unsigned int d = threadIdx.x;
@@ -121,8 +119,7 @@ __device__ void kernel_warp_alphas(unsigned int *counts, volatile float *alphas,
 }
 
 __device__ void kernel_warp_betas(unsigned int *counts, volatile float *betas,
-                                  const float *f, const float *g,
-                                  const float *den, const int *lf,
+                                  const float *f, const float *g, const int *lf,
                                   const int *ly, unsigned int T,
                                   unsigned int U) {
   unsigned int d = threadIdx.x;
@@ -209,24 +206,23 @@ __device__ void kernel_warp_betas(unsigned int *counts, volatile float *betas,
 
 __global__ void kernel_warp(unsigned int *counts, volatile float *alphas,
                             volatile float *betas, const float *f,
-                            const float *g, const float *den, const int *lf,
-                            const int *ly, unsigned int T, unsigned int U) {
+                            const float *g, const int *lf, const int *ly,
+                            unsigned int T, unsigned int U) {
   if (threadIdx.y == 0) {
-    kernel_warp_alphas(counts, alphas, f, g, den, lf, ly, T, U);
+    kernel_warp_alphas(counts, alphas, f, g, lf, ly, T, U);
   } else if (threadIdx.y == 1) {
-    kernel_warp_betas(counts, betas, f, g, den, lf, ly, T, U);
+    kernel_warp_betas(counts, betas, f, g, lf, ly, T, U);
   }
 }
 
 void run_warp_rnnt_simple(unsigned int *counts, volatile float *alphas,
                           volatile float *betas, const float *f, const float *g,
-                          const float *den, const int *lf, const int *ly,
-                          unsigned int N, unsigned int T, unsigned int U) {
+                          const int *lf, const int *ly, unsigned int N,
+                          unsigned int T, unsigned int U) {
 
   dim3 threads(W, 2);
   dim3 blocks1((T + W - 1) / W, U, N);
-  kernel_warp<<<blocks1, threads>>>(counts, alphas, betas, f, g, den, lf, ly, T,
-                                    U);
+  kernel_warp<<<blocks1, threads>>>(counts, alphas, betas, f, g, lf, ly, T, U);
   CHECK_KERNEL_STAT("rnnt_loss_simple computing alpha/beta")
   return;
 }
@@ -234,9 +230,9 @@ void run_warp_rnnt_simple(unsigned int *counts, volatile float *alphas,
 __global__ void kernel_warp_grad_f_label(volatile float *grad_f,
                                          const float *alphas,
                                          const float *betas, const float *f,
-                                         const float *g, const float *den,
-                                         const int *lf, const int *ly,
-                                         unsigned int T, unsigned int U) {
+                                         const float *g, const int *lf,
+                                         const int *ly, unsigned int T,
+                                         unsigned int U) {
   unsigned int n = blockIdx.z;
   unsigned int t = blockIdx.x * blockDim.x + threadIdx.x;
   unsigned int u = blockIdx.y * blockDim.y + threadIdx.y;
@@ -271,20 +267,21 @@ __global__ void kernel_warp_grad_f_label(volatile float *grad_f,
 
 void run_rnnt_simple_fill_grad_f(volatile float *grad_f, const float *alphas,
                                  const float *betas, const float *f,
-                                 const float *g, const float *den,
-                                 const int *lf, const int *ly, unsigned int N,
-                                 unsigned int T, unsigned int U) {
+                                 const float *g, const int *lf, const int *ly,
+                                 unsigned int N, unsigned int T,
+                                 unsigned int U) {
   dim3 threads(W, W);
   dim3 blocks((T + W - 1) / W, (U + W - 1) / W, N);
-  kernel_warp_grad_f_label<<<blocks, threads>>>(grad_f, alphas, betas, f, g,
-                                                den, lf, ly, T, U);
+  kernel_warp_grad_f_label<<<blocks, threads>>>(grad_f, alphas, betas, f, g, lf,
+                                                ly, T, U);
   CHECK_KERNEL_STAT("rnnt simple loss computing gradients for f labels")
 }
 
-__global__ void kernel_warp_grad_g_blank(
-    volatile float *grad_g, unsigned int *counts, const float *alphas,
-    const float *betas, const float *f, const float *g, const float *den,
-    const int *lf, const int *ly, unsigned int T, unsigned int U) {
+__global__ void
+kernel_warp_grad_g_blank(volatile float *grad_g, unsigned int *counts,
+                         const float *alphas, const float *betas,
+                         const float *f, const float *g, const int *lf,
+                         const int *ly, unsigned int T, unsigned int U) {
 
   unsigned int n = blockIdx.z;
   unsigned int d = threadIdx.x;
@@ -350,68 +347,12 @@ __global__ void kernel_warp_grad_g_blank(
 
 void run_rnnt_simple_fill_grad_g(volatile float *grad_f, unsigned int *counts,
                                  const float *alphas, const float *betas,
-                                 const float *f, const float *g,
-                                 const float *den, const int *lf, const int *ly,
-                                 unsigned int N, unsigned int T,
+                                 const float *f, const float *g, const int *lf,
+                                 const int *ly, unsigned int N, unsigned int T,
                                  unsigned int U) {
   dim3 threads(W, W);
   dim3 blocks((T + W - 1) / W, (U + W - 1) / W, N);
   kernel_warp_grad_g_blank<<<blocks, threads>>>(grad_f, counts, alphas, betas,
-                                                f, g, den, lf, ly, T, U);
+                                                f, g, lf, ly, T, U);
   CHECK_KERNEL_STAT("rnnt simple loss computing gradients for g blank")
-}
-
-__global__ void kernel_warp_grad_den(volatile float *grad_den,
-                                     const float *alphas, const float *betas,
-                                     const float *f, const float *g,
-                                     const float *den, const int *lf,
-                                     const int *ly, unsigned int N,
-                                     unsigned int T, unsigned int U) {
-  unsigned int n = blockIdx.z;
-  unsigned int t = blockIdx.x * blockDim.x + threadIdx.x;
-  unsigned int u = blockIdx.y * blockDim.y + threadIdx.y;
-
-  if (t >= T || u >= U)
-    return;
-
-  grad_den += IDX3(n, t, u, T, U);
-  if (t >= lf[n] || u > ly[n]) {
-    // zero the paddings
-    *grad_den = 0.0f;
-    return;
-  }
-
-  float p_zero;
-  float p_label;
-
-  if (t == lf[n] - 1) {
-    if (u == ly[n])
-      p_zero = LOG_PROB_BLANK(n, t, u);
-    else
-      p_zero = -1.0f / 0.0f;
-  } else {
-    p_zero = LOG_PROB_BLANK(n, t, u) + betas[IDX3(n, t + 1, u, T, U)];
-  }
-
-  if (u == ly[n]) {
-    p_label = -1.0f / 0.0f;
-  } else {
-    p_label = LOG_PROB_Y(n, t, u) + betas[IDX3(n, t, u + 1, T, U)];
-  }
-
-  *grad_den = expf(alphas[IDX3(n, t, u, T, U)] - betas[IDX3(n, 0, 0, T, U)] +
-                   logaddexpf(p_zero, p_label));
-}
-
-void run_rnnt_simple_fill_grad_den(volatile float *grad_den,
-                                   const float *alphas, const float *betas,
-                                   const float *f, const float *g,
-                                   const float *den, const int *lf,
-                                   const int *ly, unsigned int N,
-                                   unsigned int T, unsigned int U) {
-  dim3 threads(W, W);
-  dim3 blocks((T + W - 1) / W, (U + W - 1) / W, N);
-  kernel_warp_grad_den<<<blocks, threads>>>(grad_den, alphas, betas, f, g, den,
-                                            lf, ly, N, T, U);
-  CHECK_KERNEL_STAT("rnnt simple loss computing gradients for denonimator.")
 }

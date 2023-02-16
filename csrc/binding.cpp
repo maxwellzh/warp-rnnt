@@ -28,9 +28,10 @@
 #define None torch::indexing::None
 #define Slice torch::indexing::Slice
 
-std::tuple<at::Tensor, at::Tensor, at::Tensor>
-rnnt_loss_simple_fwd(const at::Tensor &f, const at::Tensor &g,
-                     const at::Tensor &lf, const at::Tensor &ly) {
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor>
+rnnt_loss_simple_fwd(const torch::Tensor &f, const torch::Tensor &g,
+                     const torch::Tensor &den, const torch::Tensor &lf,
+                     const torch::Tensor &ly) {
   // check contiguous
   CHECK_CONTIGUOUS(f);
   CHECK_CONTIGUOUS(g);
@@ -54,6 +55,12 @@ rnnt_loss_simple_fwd(const at::Tensor &f, const at::Tensor &g,
               "f.size(2) != g.size(1), have you run the gather step?")
   TORCH_CHECK(g.size(2) == 2, "g.size(2) != 2, have you run the gather step?")
 
+  if (den.dim() == 3) {
+    // normalzied cost
+    CHECK_CONTIGUOUS(den);
+    CHECK_FLOAT(den);
+    CHECK_CUDA(den);
+  }
   const at::cuda::OptionalCUDAGuard device_guard(device_of(f));
 
   const auto N = f.size(0);
@@ -66,21 +73,31 @@ rnnt_loss_simple_fwd(const at::Tensor &f, const at::Tensor &g,
   // for thread syncing
   auto counts = torch::zeros({N, U * 2}, lf.options());
 
-  run_warp_rnnt_simple(
-      (unsigned int *)counts.data_ptr<int>(), (float *)alphas.data_ptr<float>(),
-      (float *)betas.data_ptr<float>(), (const float *)f.data_ptr<float>(),
-      (const float *)g.data_ptr<float>(), (const int *)lf.data_ptr<int>(),
-      (const int *)ly.data_ptr<int>(), N, T, U);
-
+  if (den.dim() == 3) {
+    run_warp_rnnt_simple(
+        (unsigned int *)counts.data_ptr<int>(),
+        (float *)alphas.data_ptr<float>(), (float *)betas.data_ptr<float>(),
+        (const float *)f.data_ptr<float>(), (const float *)g.data_ptr<float>(),
+        (const float *)den.data_ptr<float>(), (const int *)lf.data_ptr<int>(),
+        (const int *)ly.data_ptr<int>(), N, T, U);
+  } else {
+    run_warp_rnnt_simple(
+        (unsigned int *)counts.data_ptr<int>(),
+        (float *)alphas.data_ptr<float>(), (float *)betas.data_ptr<float>(),
+        (const float *)f.data_ptr<float>(), (const float *)g.data_ptr<float>(),
+        (const int *)lf.data_ptr<int>(), (const int *)ly.data_ptr<int>(), N, T,
+        U);
+  }
   // costs = betas[:, 0, 0]
   auto costs = -betas.index({Slice(), 0, 0});
   return std::make_tuple(costs, alphas, betas);
 }
 
-at::Tensor rnnt_loss_simple_bwd_f(const at::Tensor &f, const at::Tensor &g,
-                                  const at::Tensor &alphas,
-                                  const at::Tensor &betas, const at::Tensor &lf,
-                                  const at::Tensor &ly) {
+torch::Tensor
+rnnt_loss_simple_bwd_f(const torch::Tensor &f, const torch::Tensor &g,
+                       const torch::Tensor &den, const torch::Tensor &alphas,
+                       const torch::Tensor &betas, const torch::Tensor &lf,
+                       const torch::Tensor &ly) {
   // removed checking since this function won't be called from outside the
   // ... package
   const at::cuda::OptionalCUDAGuard device_guard(device_of(f));
@@ -93,20 +110,32 @@ at::Tensor rnnt_loss_simple_bwd_f(const at::Tensor &f, const at::Tensor &g,
   // zero init takes time.
   auto grads = torch::empty_like(f);
 
-  run_rnnt_simple_fill_grad_f(
-      (float *)grads.data_ptr<float>(), (const float *)alphas.data_ptr<float>(),
-      (const float *)betas.data_ptr<float>(),
-      (const float *)f.data_ptr<float>(), (const float *)g.data_ptr<float>(),
-      (const int *)lf.data_ptr<int>(), (const int *)ly.data_ptr<int>(), N, T,
-      U);
+  if (den.dim() == 3) {
+    run_rnnt_simple_fill_grad_f(
+        (float *)grads.data_ptr<float>(),
+        (const float *)alphas.data_ptr<float>(),
+        (const float *)betas.data_ptr<float>(),
+        (const float *)f.data_ptr<float>(), (const float *)g.data_ptr<float>(),
+        (const float *)den.data_ptr<float>(), (const int *)lf.data_ptr<int>(),
+        (const int *)ly.data_ptr<int>(), N, T, U);
+  } else {
+    run_rnnt_simple_fill_grad_f((float *)grads.data_ptr<float>(),
+                                (const float *)alphas.data_ptr<float>(),
+                                (const float *)betas.data_ptr<float>(),
+                                (const float *)f.data_ptr<float>(),
+                                (const float *)g.data_ptr<float>(),
+                                (const int *)lf.data_ptr<int>(),
+                                (const int *)ly.data_ptr<int>(), N, T, U);
+  }
 
   return grads;
 }
 
-at::Tensor rnnt_loss_simple_bwd_g(const at::Tensor &f, const at::Tensor &g,
-                                  const at::Tensor &alphas,
-                                  const at::Tensor &betas, const at::Tensor &lf,
-                                  const at::Tensor &ly) {
+torch::Tensor
+rnnt_loss_simple_bwd_g(const torch::Tensor &f, const torch::Tensor &g,
+                       const torch::Tensor &den, const torch::Tensor &alphas,
+                       const torch::Tensor &betas, const torch::Tensor &lf,
+                       const torch::Tensor &ly) {
   // removed checking since this function won't be called from outside the
   // ... package
   const at::cuda::OptionalCUDAGuard device_guard(device_of(f));
@@ -120,21 +149,60 @@ at::Tensor rnnt_loss_simple_bwd_g(const at::Tensor &f, const at::Tensor &g,
   auto grads = torch::empty_like(g);
   auto counts = torch::zeros({N, T}, g.options());
 
-  run_rnnt_simple_fill_grad_g((float *)grads.data_ptr<float>(),
-                              (unsigned int *)counts.data_ptr<float>(),
-                              (const float *)alphas.data_ptr<float>(),
-                              (const float *)betas.data_ptr<float>(),
-                              (const float *)f.data_ptr<float>(),
-                              (const float *)g.data_ptr<float>(),
-                              (const int *)lf.data_ptr<int>(),
-                              (const int *)ly.data_ptr<int>(), N, T, U);
+  if (den.dim() == 3) {
+    run_rnnt_simple_fill_grad_g(
+        (float *)grads.data_ptr<float>(),
+        (unsigned int *)counts.data_ptr<float>(),
+        (const float *)alphas.data_ptr<float>(),
+        (const float *)betas.data_ptr<float>(),
+        (const float *)f.data_ptr<float>(), (const float *)g.data_ptr<float>(),
+        (const float *)den.data_ptr<float>(), (const int *)lf.data_ptr<int>(),
+        (const int *)ly.data_ptr<int>(), N, T, U);
+  } else {
+    run_rnnt_simple_fill_grad_g((float *)grads.data_ptr<float>(),
+                                (unsigned int *)counts.data_ptr<float>(),
+                                (const float *)alphas.data_ptr<float>(),
+                                (const float *)betas.data_ptr<float>(),
+                                (const float *)f.data_ptr<float>(),
+                                (const float *)g.data_ptr<float>(),
+                                (const int *)lf.data_ptr<int>(),
+                                (const int *)ly.data_ptr<int>(), N, T, U);
+  }
 
   return grads;
 }
 
-std::tuple<at::Tensor, at::Tensor>
-rnnt_loss(const at::Tensor &xs, const at::Tensor &ys, const at::Tensor &xn,
-          const at::Tensor &yn, const int blank, const float fastemit_lambda) {
+torch::Tensor
+rnnt_loss_simple_bwd_den(const torch::Tensor &f, const torch::Tensor &g,
+                         const torch::Tensor &den, const torch::Tensor &alphas,
+                         const torch::Tensor &betas, const torch::Tensor &lf,
+                         const torch::Tensor &ly) {
+  // removed checking since this function won't be called from outside the
+  // ... package
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(f));
+
+  const auto N = f.size(0);
+  const auto T = f.size(1);
+  // U is indeed U+1
+  const auto U = g.size(1);
+
+  // zero init takes time.
+  auto grads = torch::empty_like(den);
+
+  run_rnnt_simple_fill_grad_den(
+      (float *)grads.data_ptr<float>(), (const float *)alphas.data_ptr<float>(),
+      (const float *)betas.data_ptr<float>(),
+      (const float *)f.data_ptr<float>(), (const float *)g.data_ptr<float>(),
+      (const float *)den.data_ptr<float>(), (const int *)lf.data_ptr<int>(),
+      (const int *)ly.data_ptr<int>(), N, T, U);
+
+  return grads;
+}
+
+std::tuple<torch::Tensor, torch::Tensor>
+rnnt_loss(const torch::Tensor &xs, const torch::Tensor &ys,
+          const torch::Tensor &xn, const torch::Tensor &yn, const int blank,
+          const float fastemit_lambda) {
   // Check contiguous
   CHECK_CONTIGUOUS(xs);
   CHECK_CONTIGUOUS(ys);
@@ -164,11 +232,11 @@ rnnt_loss(const at::Tensor &xs, const at::Tensor &ys, const at::Tensor &xn,
   const auto U = xs.size(2);
   const auto V = xs.size(3);
 
-  at::Tensor grads = at::zeros_like(xs);
+  torch::Tensor grads = at::zeros_like(xs);
 
-  at::TensorOptions buffer_opts(xs.device());
-  at::TensorOptions counts_opts(xs.device());
-  at::TensorOptions costs_opts(xs.device());
+  torch::TensorOptions buffer_opts(xs.device());
+  torch::TensorOptions counts_opts(xs.device());
+  torch::TensorOptions costs_opts(xs.device());
 
   counts_opts = counts_opts.dtype(at::ScalarType::Int);
   buffer_opts = buffer_opts.dtype(at::ScalarType::Float);
@@ -179,9 +247,9 @@ rnnt_loss(const at::Tensor &xs, const at::Tensor &ys, const at::Tensor &xn,
   auto costs_shape = {N};
 
   torch::Tensor costs = torch::empty(costs_shape, costs_opts);
-  at::Tensor counts = at::zeros(counts_shape, counts_opts);
-  at::Tensor alphas = at::empty(buffer_shape, buffer_opts);
-  at::Tensor betas = at::empty(buffer_shape, buffer_opts);
+  torch::Tensor counts = at::zeros(counts_shape, counts_opts);
+  torch::Tensor alphas = at::empty(buffer_shape, buffer_opts);
+  torch::Tensor betas = at::empty(buffer_shape, buffer_opts);
 
   if (blank == -1) {
 
@@ -499,15 +567,21 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 
   m.def("rnnt_loss_simple_fwd", &rnnt_loss_simple_fwd,
         "Simple RNN-T loss foward computing", pybind11::arg("f"),
-        pybind11::arg("g"), pybind11::arg("lf"), pybind11::arg("ly"));
+        pybind11::arg("g"), pybind11::arg("den"), pybind11::arg("lf"),
+        pybind11::arg("ly"));
 
   m.def("rnnt_loss_simple_bwd_f", &rnnt_loss_simple_bwd_f,
         "Simple RNN-T loss backward computing for f", pybind11::arg("f"),
-        pybind11::arg("g"), pybind11::arg("alphas"), pybind11::arg("betas"),
-        pybind11::arg("lf"), pybind11::arg("ly"));
+        pybind11::arg("g"), pybind11::arg("den"), pybind11::arg("alphas"),
+        pybind11::arg("betas"), pybind11::arg("lf"), pybind11::arg("ly"));
 
   m.def("rnnt_loss_simple_bwd_g", &rnnt_loss_simple_bwd_g,
         "Simple RNN-T loss backward computing for g", pybind11::arg("f"),
-        pybind11::arg("g"), pybind11::arg("alphas"), pybind11::arg("betas"),
-        pybind11::arg("lf"), pybind11::arg("ly"));
+        pybind11::arg("g"), pybind11::arg("den"), pybind11::arg("alphas"),
+        pybind11::arg("betas"), pybind11::arg("lf"), pybind11::arg("ly"));
+
+  m.def("rnnt_loss_simple_bwd_den", &rnnt_loss_simple_bwd_den,
+        "Simple RNN-T loss backward computing for g", pybind11::arg("f"),
+        pybind11::arg("g"), pybind11::arg("den"), pybind11::arg("alphas"),
+        pybind11::arg("betas"), pybind11::arg("lf"), pybind11::arg("ly"));
 }
