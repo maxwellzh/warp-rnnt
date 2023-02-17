@@ -316,8 +316,14 @@ def rnnt_loss_simple(
     N, T, V = f_enc.shape
     U = labels.shape[1]
 
+    track_f = f_enc.requires_grad and torch.is_grad_enabled()
+    track_g = g_pred.requires_grad and torch.is_grad_enabled()
     if normalize:
-        den = _LogMMExp.apply(f_enc.float(), g_pred.float().transpose(1, 2))
+        den = _LogMMExp.apply(
+            f_enc.float(), 
+            g_pred.float().transpose(1, 2),
+            track_f, track_g
+        )
     else:
         den = None
 
@@ -342,9 +348,7 @@ def rnnt_loss_simple(
 
     costs = _RNNTLossSimple.apply(
         f.float(), g.float(), lf, ll,
-        f.requires_grad and torch.is_grad_enabled(),
-        g.requires_grad and torch.is_grad_enabled(),
-        den
+        track_f, track_g, den
     )
 
     if reduction == "none" or reduction is None:
