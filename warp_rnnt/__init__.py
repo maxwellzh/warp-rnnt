@@ -307,11 +307,11 @@ def rnnt_loss_simple(
         f_enc = f_enc - mf
         g_pred = g_pred - mg
 
-        den = torch.einsum(
-            "ijk,ilk->ijl",
-            f_enc.exp(),
-            g_pred.exp()
-        ).log()
+        # To ensure numerical stability, convert to double precision
+        den = torch.bmm(
+            f_enc.double().exp(),
+            g_pred.transpose(1, 2).double().exp()
+        ).float().log()
     else:
         den = None
 
@@ -328,7 +328,7 @@ def rnnt_loss_simple(
 
     # (N, U+1, V) -> (N, U+1, 1)
     g = torch.gather(
-        g_pred, dim=2, index=# (N, U+1, 1), the padded value won't be used, any value is ok.
+        g_pred, dim=2, index=  # (N, U+1, 1), the padded value won't be used, any value is ok.
         F.pad(labels, (0, 1), value=0).unsqueeze(2)
     )
     # (N, U+1, 1) -> (N, U+1, 2)

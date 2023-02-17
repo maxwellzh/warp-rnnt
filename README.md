@@ -7,9 +7,9 @@ This is ported from Ivan Sorokin's [warp-rnnt](https://github.com/1ytic/warp-rnn
 2. Fuse the `log_softmax` along with the rnn-t loss. (This would consume more memory than the `gather=True`, so it's not recommended to be used.)
 3. Simple "rnn-t": there's no a such joiner, to obtain `z(t, u)` (i.e. the log prob at position (t, u) in trivial rnn-t) in the rnn-t lattice, we simply compute the log-add of `enc(t)` and `pred(u)`.
 
-    AFAIK, this is first proposed in the original paper of rnn-t by Alex Graves ([paper](https://arxiv.org/pdf/1211.3711.pdf), Eq. 12-13). And there're already some efficient implementations: Awni Hannun's [transducer](https://github.com/awni/transducer) and Kaldi's [k2-fsa](https://k2-fsa.github.io/k2/python_api/api.html#rnnt-loss-simple).
+    And there're already some efficient implementations: Awni Hannun's [transducer](https://github.com/awni/transducer) and Kaldi's [k2-fsa](https://k2-fsa.github.io/k2/python_api/api.html#rnnt-loss-simple).
     
-    However, here in my implementation, the essential difference is that we don't directly do the normalization (the denominator in Eq. 13 in Graves' paper). Instead, the denominator is calculated in a more efficient way that can reduce the memory consumption from `O(N*T*U*V)` in the vanilla implementation to `O(max(N*T*V, N*T*U))`. In cases that the vocabulary size is relatively large (such as in Chinese ASR, V is commonly >5000), the new implementation would be promising.
+    However, here in my implementation, the denominator of log-softmax is calculated in a more efficient way that can reduce the memory consumption from `O(N*T*U*V)` in the vanilla implementation to `O(max(N*T*V, N*T*U))`. In cases that the vocabulary size is relatively large (such as in Chinese ASR, V is commonly >5000), the new implementation would be promising.
 
 ## Usage
 
