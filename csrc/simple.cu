@@ -275,10 +275,12 @@ void run_rnnt_simple_fill_grad_f(volatile float *grad_f, const float *alphas,
   CHECK_KERNEL_STAT("rnnt simple loss computing gradients for f labels")
 }
 
-__global__ void kernel_warp_grad_g_blank(
-    volatile float *grad_g, unsigned int *counts, const float *alphas,
-    const float *betas, const float *f, const float *g, const float *den,
-    const int *lf, const int *ly, unsigned int T, unsigned int U) {
+__global__ void kernel_warp_grad_g(volatile float *grad_g, unsigned int *counts,
+                                   const float *alphas, const float *betas,
+                                   const float *f, const float *g,
+                                   const float *den, const int *lf,
+                                   const int *ly, unsigned int T,
+                                   unsigned int U) {
 
   unsigned int n = blockIdx.z;
   unsigned int d = threadIdx.x;
@@ -286,8 +288,7 @@ __global__ void kernel_warp_grad_g_blank(
   unsigned int t = gorin * W + d;
   unsigned int u = blockIdx.y * blockDim.y + threadIdx.y;
 
-  unsigned int accum_t = lf[n] - 1;
-  if (t >= accum_t || u >= U)
+  if (t >= lf[n] || u >= U)
     return;
 
   grad_g += IDX3(n, u, 0, U, 2);
@@ -300,49 +301,56 @@ __global__ void kernel_warp_grad_g_blank(
   }
 
   unsigned int *lock = counts + n * U + u;
+  float tmp, r;
+  if (t == lf[n] - 1) {
+    if (u == ly[n])
+      r = 0.0f;
+    else
+      r = -std::numeric_limits<float>::infinity();
+  } else {
+    r = LOG_PROB_BLANK(n, t, u) + alphas[IDX3(n, t, u, T, U)] +
+        betas[IDX3(n, t + 1, u, T, U)] - betas[IDX3(n, 0, 0, T, U)];
+  }
 
-  float tmp;
-  float r = LOG_PROB_BLANK(n, t, u) + alphas[IDX3(n, t, u, T, U)] +
-            betas[IDX3(n, t + 1, u, T, U)] - betas[IDX3(n, 0, 0, T, U)];
-  bool non_last_thread = (gorin * W + W < lf[n]);
+  bool is_last_block = ((gorin + 1) * W >= lf[n]);
 
-  // local scan, sum up results in current thread and store at d=0
+  // local scan, sum up results in current thread
+  // and store at d=W-1 at each block
 #pragma unroll
   for (unsigned int i = 1; i < W; i *= 2) {
-    tmp = __shfl_down_sync(0xffffffff, r, i);
-    if ((d + i) < W && (non_last_thread || (t + i) < accum_t)) {
+    tmp = __shfl_up_sync(0xffffffff, r, i);
+    if (i <= d) {
       r = logaddexpf(tmp, r);
     }
   }
-  if (d > 0)
+
+  if (is_last_block) {
+    if (d + 1 < lf[n] - gorin * W)
+      return;
+  } else if (d + 1 < W)
     return;
 
   if (gorin == 0) {
     *grad_g = r;
   } else {
-    // Wait previous thread, accumulate all threads
     do {
     } while (atomicAdd(lock, 0) < gorin);
     *grad_g = logaddexpf(r, *grad_g);
   }
-  // compute -exp(s/P) at last thread
-  if (!non_last_thread) {
+  // compute -exp(s/P) at last block
+  if (is_last_block) {
     *grad_g = -expf(*grad_g);
-
-    // addup blank(n, T, U) (which directs to the final state)
-    if (u == ly[n]) {
-      *grad_g -= 1.0f;
-    } else {
+    if (u == ly[n])
+      *(grad_g + 1) = 0.0f;
+    else
       *(grad_g + 1) = -1.0f;
-    }
   }
-
   // https://stackoverflow.com/a/5233737
   __threadfence();
   atomicAdd(lock, 1);
 }
 
-void run_rnnt_simple_fill_grad_g(volatile float *grad_f, unsigned int *counts,
+void run_rnnt_simple_fill_grad_g(volatile float *grad_g, unsigned int *counts,
                                  const float *alphas, const float *betas,
                                  const float *f, const float *g,
                                  const float *den, const int *lf, const int *ly,
@@ -350,8 +358,8 @@ void run_rnnt_simple_fill_grad_g(volatile float *grad_f, unsigned int *counts,
                                  unsigned int U) {
   dim3 threads(W, W);
   dim3 blocks((T + W - 1) / W, (U + W - 1) / W, N);
-  kernel_warp_grad_g_blank<<<blocks, threads>>>(grad_f, counts, alphas, betas,
-                                                f, g, den, lf, ly, T, U);
+  kernel_warp_grad_g<<<blocks, threads>>>(grad_g, counts, alphas, betas, f, g,
+                                          den, lf, ly, T, U);
   CHECK_KERNEL_STAT("rnnt simple loss computing gradients for g blank")
 }
 
@@ -382,13 +390,13 @@ __global__ void kernel_warp_grad_den(volatile float *grad_den,
     if (u == ly[n])
       p_zero = LOG_PROB_BLANK(n, t, u);
     else
-      p_zero = -1.0f / 0.0f;
+      p_zero = -std::numeric_limits<float>::infinity();
   } else {
     p_zero = LOG_PROB_BLANK(n, t, u) + betas[IDX3(n, t + 1, u, T, U)];
   }
 
   if (u == ly[n]) {
-    p_label = -1.0f / 0.0f;
+    p_label = -std::numeric_limits<float>::infinity();
   } else {
     p_label = LOG_PROB_Y(n, t, u) + betas[IDX3(n, t, u + 1, T, U)];
   }

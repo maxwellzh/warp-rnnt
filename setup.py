@@ -38,6 +38,7 @@ setup(
             name="warp_rnnt._C",
             sources=[
                 "csrc/binding.cpp",
+                "csrc/logmatmul.cu",
                 "csrc/simple.cu",
                 "csrc/simple_unnorm.cu",
                 "csrc/vanilla.cu",

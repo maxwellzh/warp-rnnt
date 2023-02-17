@@ -3,7 +3,6 @@ import torch.nn.functional as F
 import warp_rnnt._C as core
 from typing import *
 from pkg_resources import get_distribution
-from torch.cuda.amp import autocast
 
 __version__ = get_distribution('warp_rnnt').version
 
@@ -156,13 +155,12 @@ def rnnt_loss(log_probs: torch.FloatTensor,
             blank = -1
 
     enable_grad = (log_probs.requires_grad and torch.is_grad_enabled())
-    with autocast(enabled=False):
-        if compact:
-            costs = _RNNTLossCompact.apply(log_probs.float(), labels, frames_lengths,
-                                           labels_lengths, blank, fastemit_lambda, enable_grad)
-        else:
-            costs = _RNNTLoss.apply(log_probs.float(), labels, frames_lengths,
-                                    labels_lengths, blank, fastemit_lambda)
+    if compact:
+        costs = _RNNTLossCompact.apply(log_probs.float(), labels, frames_lengths,
+                                       labels_lengths, blank, fastemit_lambda, enable_grad)
+    else:
+        costs = _RNNTLoss.apply(log_probs.float(), labels, frames_lengths,
+                                labels_lengths, blank, fastemit_lambda)
 
     if average_frames:
         costs = costs / frames_lengths.to(log_probs)
@@ -215,9 +213,8 @@ def rnnt_loss_fused_(logits: torch.FloatTensor,
     assert labels_lengths.dim() == 1
     assert frames_lengths.size(0) == labels_lengths.size(0)
 
-    with autocast(enabled=False):
-        costs = _RNNTLossFusion.apply(
-            logits.float(), labels, frames_lengths, labels_lengths, blank, (logits.requires_grad and torch.is_grad_enabled()))
+    costs = _RNNTLossFusion.apply(
+        logits.float(), labels, frames_lengths, labels_lengths, blank, (logits.requires_grad and torch.is_grad_enabled()))
 
     if average_frames:
         costs = costs / frames_lengths.to(logits)
@@ -274,6 +271,25 @@ class _RNNTLossSimple(torch.autograd.Function):
         return grad_f, grad_g, None, None, None, None, grad_den
 
 
+class _LogMMExp(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx: Any, lhs: torch.Tensor, rhs: torch.Tensor, track_l: bool = True, track_r: bool = True) -> torch.Tensor:
+        mm = core.log_matmul(lhs, rhs)
+
+        if track_l or track_r:
+            ctx.save_for_backward(lhs, rhs, mm)
+            ctx.track = [track_l, track_r]
+        return mm
+
+    @staticmethod
+    def backward(ctx: Any, grad_outputs: torch.Tensor) -> Any:
+        lhs, rhs, res = ctx.saved_tensors
+
+        grad_lhs, grad_rhs = core.log_matmul_backward(
+            grad_outputs, lhs, rhs, res, ctx.track)
+        return grad_lhs, grad_rhs, None, None
+
+
 def rnnt_loss_simple(
         f_enc: torch.Tensor,
         g_pred: torch.Tensor,
@@ -301,17 +317,7 @@ def rnnt_loss_simple(
     U = labels.shape[1]
 
     if normalize:
-        mf = torch.max(f_enc.detach(), dim=-1, keepdim=True)[0]
-        mg = torch.max(g_pred.detach(), dim=-1, keepdim=True)[0]
-
-        f_enc = f_enc - mf
-        g_pred = g_pred - mg
-
-        # To ensure numerical stability, convert to double precision
-        den = torch.bmm(
-            f_enc.double().exp(),
-            g_pred.transpose(1, 2).double().exp()
-        ).float().log()
+        den = _LogMMExp.apply(f_enc.float(), g_pred.float().transpose(1, 2))
     else:
         den = None
 
@@ -334,13 +340,12 @@ def rnnt_loss_simple(
     # (N, U+1, 1) -> (N, U+1, 2)
     g = torch.cat([g_pred[..., :1], g], dim=-1)
 
-    with autocast(enabled=False):
-        costs = _RNNTLossSimple.apply(
-            f.float(), g.float(), lf, ll,
-            f.requires_grad and torch.is_grad_enabled(),
-            g.requires_grad and torch.is_grad_enabled(),
-            den
-        )
+    costs = _RNNTLossSimple.apply(
+        f.float(), g.float(), lf, ll,
+        f.requires_grad and torch.is_grad_enabled(),
+        g.requires_grad and torch.is_grad_enabled(),
+        den
+    )
 
     if reduction == "none" or reduction is None:
         return costs

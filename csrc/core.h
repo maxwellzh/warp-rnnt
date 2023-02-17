@@ -1,6 +1,6 @@
-#ifndef RNNT_CORE_H
-#define RNNT_CORE_H
+#pragma once
 
+#include <ATen/ATen.h>
 #include <cuda_runtime.h>
 #define CHECK_KERNEL_STAT(s)                                                   \
   {                                                                            \
@@ -102,4 +102,6 @@ void run_rnnt_simple_fill_grad_den(volatile float *grad_den,
                                    const float *den, const int *lf,
                                    const int *ly, unsigned int N,
                                    unsigned int T, unsigned int U);
-#endif
+
+void log_matmul_cuda_impl(const at::Tensor &lhs_, const at::Tensor &rhs_,
+                              const at::Tensor &out);
