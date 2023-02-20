@@ -29,69 +29,31 @@ class _RNNTLossCompact(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, log_probs, labels, frames_lengths, labels_lengths, blank=0, fastemit_lambda=0.0, enable_grad: bool = True):
-        ctx.blank = blank
 
         costs, grads, loc = core.rnnt_loss_compact_forward(
             xs=log_probs, ys=labels,
             xn=frames_lengths, yn=labels_lengths,
             blank=blank,
             fastemit_lambda=fastemit_lambda,
-            require_grad=enable_grad
+            requires_grad=enable_grad
         )
         if enable_grad:
-            expand_len = (frames_lengths * (labels_lengths+1))
+            cumlen = torch.cumsum(
+                frames_lengths * (labels_lengths+1), dim=0, dtype=torch.int32)
             ctx.V = log_probs.size(-1)
-            ctx.save_for_backward(grads, loc, expand_len)
+            ctx.save_for_backward(grads, loc, cumlen)
         return costs
 
     @staticmethod
     def backward(ctx, grads_output):
-        grads, loc, expand_len = ctx.saved_tensors
-
-        if ctx.blank < 0:
-            cumSum = torch.cumsum(expand_len, dim=0, dtype=torch.int32)
-            grads_input = core.rnnt_loss_compact_backward(
-                grads_output.contiguous(), grads, cumSum, loc, ctx.V, ctx.blank)
-        else:
-            expand_grads_output = grads_output.gather(
-                dim=0, index=torch.repeat_interleave(expand_len.to(dtype=torch.long)))
-            grads *= expand_grads_output.view(-1, 1)
-            grads_input = grads
+        grads, loc, cumlen = ctx.saved_tensors
+        grads_input = core.rnnt_loss_compact_backward(
+            grads_output.contiguous(),
+            grads, cumlen,
+            loc, ctx.V, ctx.blank
+        )
 
         return grads_input, None, None, None, None, None, None
-
-
-class _RNNTLossFusion(torch.autograd.Function):
-
-    @staticmethod
-    def forward(ctx, logits, labels, frames_lengths, labels_lengths, blank=0, enable_grad: bool = True):
-        if blank < 0:
-            raise NotImplementedError(
-                "Fusion with gather=True is not implemented.")
-        else:
-            ctx.blank = blank
-
-        costs, grads = core.rnnt_loss_fused_forward(
-            xs=logits, ys=labels,
-            xn=frames_lengths, yn=labels_lengths,
-            blank=blank, require_grad=enable_grad
-        )
-        if enable_grad:
-            expand_len = (frames_lengths * (labels_lengths+1))
-            ctx.V = logits.size(-1)
-            ctx.save_for_backward(grads, expand_len)
-
-        return costs
-
-    @staticmethod
-    def backward(ctx, grads_output):
-        grads, expand_len = ctx.saved_tensors
-
-        expand_grads_output = grads_output.gather(
-            dim=0, index=torch.repeat_interleave(expand_len.to(dtype=torch.long)))
-        grads *= expand_grads_output.view(-1, 1)
-
-        return grads, None, None, None, None, None
 
 
 def rnnt_loss(log_probs: torch.FloatTensor,
@@ -129,6 +91,11 @@ def rnnt_loss(log_probs: torch.FloatTensor,
         fastemit_lambda (float, optional): FastEmit regularization
             (https://arxiv.org/abs/2010.11148).
             Default: 0.0.
+        compact (bool, optional): Use compact layout, if True, shapes of inputs should be:
+            log_probs: (STU, 2)
+            labels:    (SU, )
+            where STU = sum(frames_lengths * (labels_lengths+1))
+                  SU  = sum(labels_lengths)
     """
 
     assert average_frames is None or isinstance(average_frames, bool)
@@ -140,11 +107,16 @@ def rnnt_loss(log_probs: torch.FloatTensor,
     assert not frames_lengths.requires_grad, "frames_lengths does not require gradients"
     assert not labels_lengths.requires_grad, "labels_lengths does not require gradients"
 
-    if gather:
-        if compact:
-            blank = -(blank+1)  # cast [0, ) to ( , -1)
-
-        else:
+    if compact:
+        costs = _RNNTLossCompact.apply(
+            log_probs.float(),
+            labels, frames_lengths,
+            labels_lengths, blank,
+            fastemit_lambda,
+            (log_probs.requires_grad and torch.is_grad_enabled())
+        )
+    else:
+        if gather:
             N, T, U, V = log_probs.size()
             index = torch.full(
                 [N, T, U, 2], blank,
@@ -154,70 +126,16 @@ def rnnt_loss(log_probs: torch.FloatTensor,
             log_probs = log_probs.gather(dim=3, index=index)
             blank = -1
 
-    enable_grad = (log_probs.requires_grad and torch.is_grad_enabled())
-    if compact:
-        costs = _RNNTLossCompact.apply(log_probs.float(), labels, frames_lengths,
-                                       labels_lengths, blank, fastemit_lambda, enable_grad)
-    else:
-        costs = _RNNTLoss.apply(log_probs.float(), labels, frames_lengths,
-                                labels_lengths, blank, fastemit_lambda)
+        costs = _RNNTLoss.apply(
+            log_probs.float(),
+            labels, frames_lengths,
+            labels_lengths, blank,
+            fastemit_lambda
+        )
 
     if average_frames:
         costs = costs / frames_lengths.to(log_probs)
 
-    if reduction == "sum":
-        return costs.sum()
-    elif reduction == "mean":
-        return costs.mean()
-    return costs
-
-
-def rnnt_loss_fused(logits: torch.FloatTensor,
-                    labels: torch.IntTensor,
-                    frames_lengths: torch.IntTensor,
-                    labels_lengths: torch.IntTensor,
-                    average_frames: bool = False,
-                    reduction: Optional[AnyStr] = None,
-                    blank: int = 0) -> torch.Tensor:
-    logit_clone = logits.clone()
-    return rnnt_loss_fused_(logit_clone, labels, frames_lengths, labels_lengths, average_frames,
-                            reduction, blank)
-
-
-def rnnt_loss_fused_(logits: torch.FloatTensor,
-                     labels: torch.IntTensor,
-                     frames_lengths: torch.IntTensor,
-                     labels_lengths: torch.IntTensor,
-                     average_frames: bool = False,
-                     reduction: Optional[AnyStr] = None,
-                     blank: int = 0) -> torch.Tensor:
-
-    assert average_frames is None or isinstance(average_frames, bool)
-    assert reduction is None or reduction in ("none", "mean", "sum")
-    assert isinstance(blank, int)
-
-    assert not labels.requires_grad, "labels does not require gradients"
-    assert not frames_lengths.requires_grad, "frames_lengths does not require gradients"
-    assert not labels_lengths.requires_grad, "labels_lengths does not require gradients"
-
-    assert logits.dim(
-    ) == 2, f"Logits should be of shape (Stu, V), instead of {logits.size()}"
-    if labels.dim() == 2:
-        assert labels.size(
-            1) == 1, f"Labels should be of size (Su, 1) of (Su,), instead of {labels.size()}"
-    elif labels.dim() != 1:
-        raise RuntimeError(
-            f"Labels should be of size (Su, 1) of (Su,), instead of {labels.size()}")
-
-    assert frames_lengths.dim() == 1
-    assert labels_lengths.dim() == 1
-    assert frames_lengths.size(0) == labels_lengths.size(0)
-
-    costs = _RNNTLossFusion.apply(
-        logits.float(), labels, frames_lengths, labels_lengths, blank, (logits.requires_grad and torch.is_grad_enabled()))
-
-    if average_frames:
-        costs = costs / frames_lengths.to(logits)
     if reduction == "none" or reduction is None:
         return costs
     elif reduction == "sum":
@@ -227,6 +145,7 @@ def rnnt_loss_fused_(logits: torch.FloatTensor,
     else:
         raise ValueError(
             f"Unknown reduction method: {reduction}, expected to be one of ['mean', 'sum', 'none']")
+
 
 # NOTE (huahuan): to simplify the code, I hard-coded the blank=0 in rnnt_loss_simple()
 
@@ -320,7 +239,7 @@ def rnnt_loss_simple(
     track_g = g_pred.requires_grad and torch.is_grad_enabled()
     if normalize:
         den = _LogMMExp.apply(
-            f_enc.float(), 
+            f_enc.float(),
             g_pred.float().transpose(1, 2),
             track_f, track_g
         )
@@ -340,7 +259,7 @@ def rnnt_loss_simple(
 
     # (N, U+1, V) -> (N, U+1, 1)
     g = torch.gather(
-        g_pred, dim=2, index=  # (N, U+1, 1), the padded value won't be used, any value is ok.
+        g_pred, dim=2, index=# (N, U+1, 1), the padded value won't be used, any value is ok.
         F.pad(labels, (0, 1), value=0).unsqueeze(2)
     )
     # (N, U+1, 1) -> (N, U+1, 2)

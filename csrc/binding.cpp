@@ -271,273 +271,136 @@ rnnt_loss(const torch::Tensor &xs, const torch::Tensor &ys,
   return std::make_tuple(costs, grads);
 }
 
-// return (costs, grad, loc, blank)
+// return (costs, grad, loc)
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor>
 rnnt_loss_compact_forward(const torch::Tensor &xs, const torch::Tensor &ys,
                           const torch::Tensor &xn, const torch::Tensor &yn,
                           const int blank, const float fastemit_lambda,
-                          const bool require_grad) {
-  // Check contiguous
-  CHECK_CONTIGUOUS(xs);
-  CHECK_CONTIGUOUS(ys);
-  CHECK_CONTIGUOUS(xn);
-  CHECK_CONTIGUOUS(yn);
-  // Check types
-  CHECK_FLOAT(xs);
-  CHECK_INT(ys);
-  CHECK_INT(xn);
-  CHECK_INT(yn);
-  // Check device
-  CHECK_CUDA(xs);
-  CHECK_CUDA(ys);
-  CHECK_CUDA(xn);
-  CHECK_CUDA(yn);
-  // Check number of dimensions and elements
-  TORCH_CHECK(xs.dim() == 2, "xs must have 2 dimensions")
-  TORCH_CHECK(xn.size(0) == yn.size(0), "xn and yn shape must be equal (N,)")
-  TORCH_CHECK(ys.numel() == yn.sum().item<int64_t>(),
-              "ys shape must be equal to (sum(yn), )")
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(xs));
+                          const bool requires_grad) {
+    // Check contiguous
+    CHECK_CONTIGUOUS(xs);
+    CHECK_CONTIGUOUS(ys);
+    CHECK_CONTIGUOUS(xn);
+    CHECK_CONTIGUOUS(yn);
+    // Check types
+    CHECK_FLOAT(xs);
+    CHECK_INT(ys);
+    CHECK_INT(xn);
+    CHECK_INT(yn);
+    // Check device
+    CHECK_CUDA(xs);
+    CHECK_CUDA(ys);
+    CHECK_CUDA(xn);
+    CHECK_CUDA(yn);
+    // Check number of dimensions and elements
+    TORCH_CHECK(xs.dim() == 2, "xs must have 2 dimensions")
+    TORCH_CHECK(xn.size(0) == yn.size(0), "xn and yn shape must be equal (N,)")
+    TORCH_CHECK(ys.numel() == yn.sum().item<int64_t>(),
+                "ys shape must be equal to (sum(yn), )")
+    const at::cuda::OptionalCUDAGuard device_guard(device_of(xs));
 
-  const auto N = xn.size(0);
-  const auto Tm = xn.max().item<int64_t>();     // max of {T_i}
-  const auto Um = yn.max().item<int64_t>() + 1; // max of {U_i}
-  const auto V = xs.size(1);
+    const auto N = xn.size(0);
+    const auto Tm = xn.max().item<int64_t>();     // max of {T_i}
+    const auto Um = yn.max().item<int64_t>() + 1; // max of {U_i}
+    const auto V = xs.size(1);
 
-  auto memPref =
-      (xn * (yn + 1))
-          .cumsum(0, at::ScalarType::Int); // count of frames by current batch
-  auto labelPref = yn.cumsum(0, at::ScalarType::Int); // copy yn
+    auto memPref =
+        (xn * (yn + 1))
+            .cumsum(0, torch::kInt32); // count of frames by current batch
+    auto labelPref = yn.cumsum(0, torch::kInt32); // copy yn
 
-  int64_t STU = memPref[-1].item<int64_t>();
-  TORCH_CHECK(xs.size(0) == STU, "xs shape mismatch with (\\sum{xn*(yn+1)}, )")
+    int64_t STU = memPref[-1].item<int64_t>();
+    TORCH_CHECK(xs.size(0) == STU,
+                "xs shape mismatch with (\\sum{xn*(yn+1)}, )")
 
-  // set begin of memory location of each sequence
-  {
-    auto cumsumMemPref = memPref.index({Slice(0, -1, None)}).clone();
-    auto cumsumLablePref = labelPref.index({Slice(0, -1, None)}).clone();
-    memPref.index_put_({Slice(1, None, None)}, cumsumMemPref);
-    labelPref.index_put_({Slice(1, None, None)}, cumsumLablePref);
-  }
-  memPref[0] = 0;
-  labelPref[0] = 0;
+    // set begin of memory location of each sequence
+    {
+        auto cumsumMemPref = memPref.index({Slice(0, -1, None)}).clone();
+        auto cumsumLablePref = labelPref.index({Slice(0, -1, None)}).clone();
+        memPref.index_put_({Slice(1, None, None)}, cumsumMemPref);
+        labelPref.index_put_({Slice(1, None, None)}, cumsumLablePref);
+    }
+    memPref[0] = 0;
+    labelPref[0] = 0;
 
-  const auto device = xs.device();
-  // the negtive log likelihood
-  torch::Tensor costs =
-      torch::empty({N}, torch::dtype(torch::kFloat32).device(device));
-  //  for maintain the execute status of forward/backward calculation
-  torch::Tensor counts = torch::zeros(
-      {ys.numel() * 2 + 2 * N}, torch::dtype(torch::kInt32).device(device));
-  // forward variable of RNN-T
-  torch::Tensor alphas =
-      torch::empty({STU}, torch::dtype(torch::kFloat32).device(device));
-  // backward variable of RNN-T
-  torch::Tensor betas = torch::empty_like(alphas);
-  torch::Tensor grads;
-
-  int modified_blank = blank;
-  if (!require_grad && modified_blank < 0) {
-    // For better efficiency, gather is not required, if we don't need to
-    // compute gradients.
-    modified_blank = (-1) - blank;
-  }
-
-  if (modified_blank < 0) {
-    // gather mode
-    int real_blank = (-1) - blank;
-
-    torch::Tensor gather_xs =
-        torch::empty({STU, 2L}, torch::dtype(torch::kFloat32).device(device));
+    torch::Tensor gather_xs = torch::empty({STU, 2L}, xs.options());
     torch::Tensor loc =
-        torch::zeros({STU}, torch::dtype(torch::kInt64).device(device));
+        torch::zeros({STU}, torch::dtype(torch::kInt64).device(xs.device()));
 
-    run_gather(xs.data_ptr<float>(), ys.data_ptr<int>(),
-               (unsigned int *)xn.data_ptr<int>(),
-               (unsigned int *)yn.data_ptr<int>(), gather_xs.data_ptr<float>(),
-               loc.data_ptr<long>(), (unsigned int *)memPref.data_ptr<int>(),
-               (unsigned int *)labelPref.data_ptr<int>(), N, Tm, Um, V,
-               real_blank);
+    // gather the labels & blank
+    run_gather_for_compact(
+        xs.data_ptr<float>(), ys.data_ptr<int>(),
+        (unsigned int *)xn.data_ptr<int>(), (unsigned int *)yn.data_ptr<int>(),
+        gather_xs.data_ptr<float>(), loc.data_ptr<long>(),
+        (unsigned int *)memPref.data_ptr<int>(),
+        (unsigned int *)labelPref.data_ptr<int>(), N, Tm, Um, V, blank);
 
-    grads = torch::zeros_like(gather_xs);
+    // the negtive log likelihood
+    torch::Tensor costs = torch::empty({N}, xs.options());
+    //  for maintain the execute status of forward/backward calculation
+    torch::Tensor counts = torch::zeros({ys.numel() * 2 + 2 * N}, ys.options());
 
-    run_warp_rnnt_compact_gather(
+    // backward variable of RNN-T
+    torch::Tensor betas = torch::empty({STU}, xs.options());
+
+    torch::Tensor grads, alphas;
+    if (requires_grad) {
+        // forward variable of RNN-T
+        alphas = torch::empty_like(betas);
+        grads = torch::empty_like(gather_xs);
+    }
+
+    run_warp_rnnt_compact(
         (unsigned int *)counts.data_ptr<int>(), alphas.data_ptr<float>(),
         betas.data_ptr<float>(), gather_xs.data_ptr<float>(),
         grads.data_ptr<float>(), costs.data_ptr<float>(),
         (unsigned int *)xn.data_ptr<int>(), (unsigned int *)yn.data_ptr<int>(),
         (unsigned int *)memPref.data_ptr<int>(),
-        (unsigned int *)labelPref.data_ptr<int>(), N, Tm, Um, fastemit_lambda);
+        (unsigned int *)labelPref.data_ptr<int>(), N, Tm, Um, fastemit_lambda,
+        requires_grad);
 
     return std::make_tuple(costs, grads, loc);
-  } else {
-    memPref *= V;
-    if (require_grad) {
-
-      grads = torch::zeros_like(xs);
-      run_warp_rnnt_compact(
-          (unsigned int *)counts.data_ptr<int>(), alphas.data_ptr<float>(),
-          betas.data_ptr<float>(), (unsigned int *)ys.data_ptr<int>(),
-          xs.data_ptr<float>(), grads.data_ptr<float>(),
-          costs.data_ptr<float>(), (unsigned int *)xn.data_ptr<int>(),
-          (unsigned int *)yn.data_ptr<int>(),
-          (unsigned int *)memPref.data_ptr<int>(),
-          (unsigned int *)labelPref.data_ptr<int>(), N, Tm, Um, V, blank,
-          fastemit_lambda);
-
-      // non-gather mode, only (costs, grad) is useful.
-      return std::make_tuple(costs, grads, grads);
-    } else {
-      run_rnnt_cost_cal_compact(
-          (unsigned int *)counts.data_ptr<int>(), alphas.data_ptr<float>(),
-          (unsigned int *)ys.data_ptr<int>(), xs.data_ptr<float>(),
-          costs.data_ptr<float>(), (unsigned int *)xn.data_ptr<int>(),
-          (unsigned int *)yn.data_ptr<int>(),
-          (unsigned int *)memPref.data_ptr<int>(),
-          (unsigned int *)labelPref.data_ptr<int>(), N, Tm, Um, V,
-          modified_blank);
-
-      // non-gather mode, only (costs, ) is useful.
-      return std::make_tuple(costs, costs, costs);
-    }
-  }
 }
 
-// return (costs, grad)
-std::tuple<torch::Tensor, torch::Tensor>
-rnnt_loss_fused_forward(torch::Tensor &xs, const torch::Tensor &ys,
-                        const torch::Tensor &xn, const torch::Tensor &yn,
-                        const int blank, const bool require_grad) {
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(xs));
-  const auto N = xn.size(0);
-  const auto Tm = xn.max().item<int64_t>();     // max of {T_i}
-  const auto Um = yn.max().item<int64_t>() + 1; // max of {U_i}
-  const auto V = xs.size(1);
-
-  auto memPref =
-      (xn * (yn + 1))
-          .cumsum(0, at::ScalarType::Int); // count of frames by current batch
-  auto labelPref = yn.cumsum(0, at::ScalarType::Int); // copy yn
-
-  int64_t STU = memPref[-1].item<int64_t>();
-  TORCH_CHECK(xs.size(0) == STU, "xs shape mismatch with (\\sum{xn*(yn+1)}, )")
-
-  // set begin of memory location of each sequence
-  {
-    auto cumsumMemPref = memPref.index({Slice(0, -1, None)}).clone();
-    auto cumsumLablePref = labelPref.index({Slice(0, -1, None)}).clone();
-    memPref.index_put_({Slice(1, None, None)}, cumsumMemPref);
-    labelPref.index_put_({Slice(1, None, None)}, cumsumLablePref);
-  }
-  memPref[0] = 0;
-  const auto Offset = memPref * V;
-  labelPref[0] = 0;
-
-  // x -= c, c = max(x)
-  xs -= xs.max();
-  // log_softmax(x) = x - c - log(sum(exp(x-c)))
-  const auto summed = torch::logsumexp(xs, -1, true); // shape (STU, )
-  xs -= summed;
-
-  const auto device = xs.device();
-  // the negtive log likelihood
-  torch::Tensor costs =
-      torch::empty({N}, torch::dtype(torch::kFloat32).device(device));
-  //  for maintain the execute status of forward/backward calculation
-  torch::Tensor counts = torch::zeros(
-      {ys.numel() * 2 + 2 * N}, torch::dtype(torch::kInt32).device(device));
-  // forward variable of RNN-T
-  torch::Tensor alphas =
-      torch::empty({STU}, torch::dtype(torch::kFloat32).device(device));
-
-  if (require_grad) {
-    // backward variable of RNN-T
-    torch::Tensor betas = torch::empty_like(alphas);
-    torch::Tensor grads = torch::zeros_like(xs);
-
-    run_warp_rnnt_compact(
-        (unsigned int *)counts.data_ptr<int>(), alphas.data_ptr<float>(),
-        betas.data_ptr<float>(), (unsigned int *)ys.data_ptr<int>(),
-        xs.data_ptr<float>(), grads.data_ptr<float>(), costs.data_ptr<float>(),
-        (unsigned int *)xn.data_ptr<int>(), (unsigned int *)yn.data_ptr<int>(),
-        (unsigned int *)Offset.data_ptr<int>(),
-        (unsigned int *)labelPref.data_ptr<int>(), N, Tm, Um, V, blank, 0.0f);
-
-    alphas += betas;
-    run_alphabeta_div_prob(alphas.data_ptr<float>(), costs.data_ptr<float>(),
-                           (unsigned int *)xn.data_ptr<int>(),
-                           (unsigned int *)yn.data_ptr<int>(),
-                           (unsigned int *)memPref.data_ptr<int>(), N, Tm, Um);
-
-    xs += alphas.view({STU, 1});
-    xs = torch::exp_(xs);
-    grads += xs;
-
-    // non gather mode, only (costs, grad) is useful.
-    return std::make_tuple(costs, grads);
-  } else {
-    run_rnnt_cost_cal_compact(
-        (unsigned int *)counts.data_ptr<int>(), alphas.data_ptr<float>(),
-        (unsigned int *)ys.data_ptr<int>(), xs.data_ptr<float>(),
-        costs.data_ptr<float>(), (unsigned int *)xn.data_ptr<int>(),
-        (unsigned int *)yn.data_ptr<int>(),
-        (unsigned int *)Offset.data_ptr<int>(),
-        (unsigned int *)labelPref.data_ptr<int>(), N, Tm, Um, V, blank);
-
-    return std::make_tuple(costs, costs);
-  }
-}
 
 torch::Tensor rnnt_loss_compact_backward(const torch::Tensor &grad_cost,
-                                         torch::Tensor &grad,
-                                         const torch::Tensor &cumSum,
+                                         const torch::Tensor &grad_xs,
+                                         const torch::Tensor &cum_lens,
                                          const torch::Tensor &loc, long V,
                                          int blank) {
-  // Check contiguous
-  CHECK_CONTIGUOUS(grad_cost);
-  CHECK_CONTIGUOUS(grad);
-  // Check types
-  CHECK_FLOAT(grad_cost);
-  CHECK_FLOAT(grad);
-  // Check device
-  CHECK_CUDA(grad_cost);
-  CHECK_CUDA(grad);
-  // Check number of dimensions and elements
-  TORCH_CHECK(grad_cost.dim() == 1, "grad_cost must have 1 dimensions") // (N,)
-  TORCH_CHECK(grad.dim() == 2, "grad must have 2 dimensions") // (STU, 2)
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(grad_cost));
-
-  const auto N = grad_cost.size(0);
-  const auto STU = grad.size(0);
-
-  const auto device = grad_cost.device();
-
-  if (blank < 0) {
+    // Check contiguous
+    CHECK_CONTIGUOUS(grad_cost);
+    CHECK_CONTIGUOUS(grad_xs);
     CHECK_CONTIGUOUS(loc);
+    // Check types
+    CHECK_FLOAT(grad_cost);
+    CHECK_FLOAT(grad_xs);
     TORCH_CHECK(loc.scalar_type() == at::ScalarType::Long,
                 "loc must be a Long tensor");
+    // Check device
+    CHECK_CUDA(grad_cost);
+    CHECK_CUDA(grad_xs);
+    CHECK_CUDA(cum_lens);
     CHECK_CUDA(loc);
-    TORCH_CHECK(grad.size(0) == loc.size(0),
-                " grad and loc must be equal in dim=0")
+    // Check number of dimensions and elements
+    TORCH_CHECK(grad_cost.dim() == 1,
+                "grad_cost must have 1 dimensions")                // (N,)
+    TORCH_CHECK(grad_xs.dim() == 2, "grad must have 2 dimensions") // (STU, 2)
+    TORCH_CHECK(grad_xs.size(0) == loc.size(0),
+                "grad and loc must be equal in dim=0")
+    const at::cuda::OptionalCUDAGuard device_guard(device_of(grad_cost));
 
-    int real_blank = -1 - blank;
+    const auto N = grad_cost.size(0);
+    const auto STU = grad_xs.size(0);
 
-    torch::Tensor scatter_grad =
-        torch::zeros({STU, V}, torch::dtype(torch::kFloat32).device(device));
+    torch::Tensor scatter_grad = torch::zeros({STU, V}, grad_cost.options());
 
-    run_scatter_grad(grad_cost.data_ptr<float>(), grad.data_ptr<float>(),
-                     loc.data_ptr<long>(),
-                     (unsigned int *)cumSum.data_ptr<int>(),
-                     scatter_grad.data_ptr<float>(), STU, N, V, real_blank);
+    run_scatter_grad_compact(
+        grad_cost.data_ptr<float>(), grad_xs.data_ptr<float>(),
+        loc.data_ptr<long>(), (unsigned int *)cum_lens.data_ptr<int>(),
+        scatter_grad.data_ptr<float>(), STU, N, V, blank);
 
     return scatter_grad;
-  } else {
-
-    run_backward_compact(grad_cost.data_ptr<float>(), grad.data_ptr<float>(),
-                         (unsigned int *)cumSum.data_ptr<int>(), STU, N, V);
-
-    return grad;
-  }
 }
 
 torch::Tensor log_matmul_cuda(const torch::Tensor &self,
@@ -647,18 +510,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         pybind11::arg("xs"), pybind11::arg("ys"), pybind11::arg("xn"),
         pybind11::arg("yn"), pybind11::arg("blank") = 0,
         pybind11::arg("fastemit_lambda") = 0.0,
-        pybind11::arg("require_grad") = true);
+        pybind11::arg("requires_grad") = true);
 
   m.def("rnnt_loss_compact_backward", &rnnt_loss_compact_backward,
         "Compact RNN-T loss backward", pybind11::arg("grad_cost"),
         pybind11::arg("grad"), pybind11::arg("cumSum"), pybind11::arg("loc"),
         pybind11::arg("V"), pybind11::arg("blank"));
-
-  m.def("rnnt_loss_fused_forward", &rnnt_loss_fused_forward,
-        "CUDA-Warp RNN-Transducer loss with fused operations",
-        pybind11::arg("xs"), pybind11::arg("ys"), pybind11::arg("xn"),
-        pybind11::arg("yn"), pybind11::arg("blank") = 0,
-        pybind11::arg("require_grad") = true);
 
   m.def("rnnt_loss_simple_fwd", &rnnt_loss_simple_fwd,
         "Simple RNN-T loss foward computing", pybind11::arg("f"),

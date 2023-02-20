@@ -24,7 +24,7 @@ long_description = get_long_description()
 
 setup(
     name="warp_rnnt",
-    version="0.9.0",
+    version="0.9.1",
     description="PyTorch bindings for CUDA-Warp RNN-Transducer",
     long_description=long_description,
     long_description_content_type="text/markdown",
@@ -42,10 +42,8 @@ setup(
                 "csrc/simple.cu",
                 "csrc/simple_unnorm.cu",
                 "csrc/vanilla.cu",
-                "csrc/vanilla_compact.cu",
                 "csrc/gather.cu",
-                "csrc/gather_compact.cu",
-                "csrc/compact_collector.cu"
+                "csrc/compact.cu"
             ]
         )
     ],

@@ -256,6 +256,84 @@ class RNNTLossTest(unittest.TestCase):
         np.testing.assert_array_almost_equal(
             grads.cpu().numpy(), expected_grads)
 
+    def test_forward_batch_compact(self):
+
+        xs = torch.tensor(
+            [
+                [[[0.1, 0.6, 0.1, 0.1, 0.1],
+                  [0.1, 0.1, 0.6, 0.1, 0.1],
+                  [0.1, 0.1, 0.2, 0.8, 0.1]],
+                 [[0.1, 0.6, 0.1, 0.1, 0.1],
+                  [0.1, 0.1, 0.2, 0.1, 0.1],
+                  [0.7, 0.1, 0.2, 0.1, 0.1]],
+                 [[0, 0, 0, 0, 0],
+                  [0, 0, 0, 0, 0],
+                  [0, 0, 0, 0, 0]]],
+
+                [[[0.1, 0.6, 0.1, 0.1, 0.1],
+                  [0.1, 0.1, 0.6, 0.1, 0.1],
+                  [0.1, 0.1, 0.2, 0.8, 0.1]],
+                 [[0.1, 0.6, 0.1, 0.1, 0.1],
+                  [0.1, 0.1, 0.2, 0.1, 0.1],
+                  [0.7, 0.1, 0.2, 0.1, 0.1]],
+                 [[0.1, 0.6, 0.1, 0.1, 0.1],
+                  [0.1, 0.1, 0.6, 0.1, 0.1],
+                  [0.1, 0.1, 0.2, 0.8, 0.1]]]
+            ],
+            dtype=torch.float32)
+
+        xs = torch.nn.functional.log_softmax(xs, dim=-1)
+        ys = torch.tensor([[1, 2], [1, 2]], dtype=torch.int)
+
+        xn = torch.tensor([2, 3], dtype=torch.int)
+        yn = torch.tensor([2, 2], dtype=torch.int)
+
+        V = xs.size(-1)
+        xs = torch.cat(
+            [
+                xs[i, :xn[i], :yn[i]+1].view(-1, V)
+                for i in range(xs.size(0))
+            ],
+            dim=0
+        )
+        ys = torch.cat([ys[i, :yn[i]] for i in range(ys.size(0))], dim=0)
+
+        costs, grads, loc = core.rnnt_loss_compact_forward(
+            xs.cuda(), ys.cuda(),
+            xn.cuda(), yn.cuda())
+
+        expected_costs = np.array([4.495666773770733, 5.7367250428101615])
+
+        np.testing.assert_array_almost_equal(
+            costs.cpu().numpy(), expected_costs, decimal=6)
+
+        cumlen = torch.cumsum(xn * (yn+1), dim=0, dtype=torch.int32).cuda()
+        grads = core.rnnt_loss_compact_backward(
+            torch.ones_like(costs).contiguous(),
+            grads, cumlen,
+            loc, V, 0
+        )
+        expected_grads = np.array([
+            [-0.308198071906, -0.6918019280939998, 0.0, 0.0, 0.0],
+            [-0.308198071906, 0.0, -0.3836038561880001, 0.0, 0.0],
+            [-0.3836038561880001, 0.0, 0.0, 0.0, 0.0],
+            [0.0, -0.308198071906, 0.0, 0.0, 0.0],
+            [0.0, 0.0, -0.6163961438119995, 0.0, 0.0],
+            [-0.9999999999999991, 0.0, 0.0, 0.0, 0.0],
+
+            [-0.45920877, -0.54079123, -0.,         -0.,         -0.],
+            [-0.32392462, -0.,         -0.21686661, -0.,         -0.],
+            [-0.21686661, -0.,         -0.,         -0.,         -0.],
+            [-0.13528414, -0.32392462, -0.,         -0.,         -0.],
+            [-0.29937584, -0.,         -0.3484734,  -0.,         -0.],
+            [-0.56534001, -0.,         -0.,         -0.,         -0.],
+            [-0.,         -0.13528414, -0.,         -0.,         -0.],
+            [-0.,         -0.,         -0.43465999, -0.,         -0.],
+            [-1.,         -0.,         -0.,         -0.,         -0.]
+        ])
+
+        np.testing.assert_array_almost_equal(
+            grads.cpu().numpy(), expected_grads)
 
 if __name__ == "__main__":
     unittest.main()
