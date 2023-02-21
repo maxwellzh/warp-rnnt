@@ -164,7 +164,7 @@ class _RNNTLossSimple(torch.autograd.Function):
         grad_g = core.rnnt_loss_simple_bwd_g(
             f, g, den, alphas, betas, lf, ll) if track_grad_g else None
 
-        if den is not None and (track_grad_f or track_grad_g):
+        if den.dim() == 3  and (track_grad_f or track_grad_g):
             grad_den = core.rnnt_loss_simple_bwd_den(
                 f, g, den, alphas, betas, lf, ll)
         else:
