@@ -41,6 +41,7 @@ class _RNNTLossCompact(torch.autograd.Function):
             cumlen = torch.cumsum(
                 frames_lengths * (labels_lengths+1), dim=0, dtype=torch.int32)
             ctx.V = log_probs.size(-1)
+            ctx.blank = blank
             ctx.save_for_backward(grads, loc, cumlen)
         return costs
 
