@@ -165,7 +165,7 @@ class _RNNTLossSimple(torch.autograd.Function):
         grad_g = core.rnnt_loss_simple_bwd_g(
             f, g, den, alphas, betas, lf, ll) if track_grad_g else None
 
-        if den.dim() == 3  and (track_grad_f or track_grad_g):
+        if den.dim() == 3 and (track_grad_f or track_grad_g):
             grad_den = core.rnnt_loss_simple_bwd_den(
                 f, g, den, alphas, betas, lf, ll)
         else:
@@ -217,7 +217,8 @@ def rnnt_loss_simple(
         lf: torch.Tensor,
         ll: torch.Tensor,
         reduction: Literal['none', 'sum', 'mean'] = 'mean',
-        normalize: bool = True):
+        factor_den: float = 1.0,
+        avg_length: bool = False):
     """CUDA-warp simple rnn-t loss with the joiner as an log-add op.
 
     Arguments:
@@ -226,7 +227,8 @@ def rnnt_loss_simple(
         labels: (N, U)      target label seqs
         lf:     (N, )       lengths of f_enc
         ll:     (N, )       lengths of labels
-        normalize (bool) : whether conduct log-softmax or not. If not, this would return non-normalized costs.
+        factor_den (float) : a weighting factor of denominator in log space
+            e.g. 1.0 is a fully local normalized loss, 0.0 is fully non-local normalized loss.
     """
     assert torch.all(ll > 0), f"get invalid lengths of labels (=0): {ll}"
     lf = lf.to(device=f_enc.device, dtype=torch.int32)
@@ -238,14 +240,15 @@ def rnnt_loss_simple(
 
     track_f = f_enc.requires_grad and torch.is_grad_enabled()
     track_g = g_pred.requires_grad and torch.is_grad_enabled()
-    if normalize:
+    if factor_den == 0.0:
+        den = None
+    else:
         den = _LogMMExp.apply(
             f_enc.float(),
             g_pred.float().transpose(1, 2),
             track_f, track_g
         )
-    else:
-        den = None
+        den = factor_den * den
 
     """
     gather the target label and the blank symbol
@@ -260,7 +263,7 @@ def rnnt_loss_simple(
 
     # (N, U+1, V) -> (N, U+1, 1)
     g = torch.gather(
-        g_pred, dim=2, index=# (N, U+1, 1), the padded value won't be used, any value is ok.
+        g_pred, dim=2, index=  # (N, U+1, 1), the padded value won't be used, any value is ok.
         F.pad(labels, (0, 1), value=0).unsqueeze(2)
     )
     # (N, U+1, 1) -> (N, U+1, 2)
@@ -270,6 +273,8 @@ def rnnt_loss_simple(
         f.float(), g.float(), lf, ll,
         track_f, track_g, den
     )
+    if avg_length:
+        costs /= lf + ll
 
     if reduction == "none" or reduction is None:
         return costs
