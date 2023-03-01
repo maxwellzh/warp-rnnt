@@ -345,14 +345,14 @@ __global__ void kernel_warp_grad_g(volatile float *grad_g, unsigned int *counts,
   atomicAdd(lock, 1);
 }
 
-void run_rnnt_simple_fill_grad_g(volatile float *grad_f, unsigned int *counts,
+void run_rnnt_simple_fill_grad_g(volatile float *grad_g, unsigned int *counts,
                                  const float *alphas, const float *betas,
                                  const float *f, const float *g, const int *lf,
                                  const int *ly, unsigned int N, unsigned int T,
                                  unsigned int U) {
   dim3 threads(W, W);
   dim3 blocks((T + W - 1) / W, (U + W - 1) / W, N);
-  kernel_warp_grad_g<<<blocks, threads>>>(grad_f, counts, alphas, betas, f, g,
+  kernel_warp_grad_g<<<blocks, threads>>>(grad_g, counts, alphas, betas, f, g,
                                           lf, ly, T, U);
-  CHECK_KERNEL_STAT("rnnt simple loss computing gradients for g blank")
+  CHECK_KERNEL_STAT("rnnt simple loss computing gradients for g")
 }

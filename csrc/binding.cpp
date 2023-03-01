@@ -147,7 +147,7 @@ rnnt_loss_simple_bwd_g(const torch::Tensor &f, const torch::Tensor &g,
 
   // zero init takes time.
   auto grads = torch::empty_like(g);
-  auto counts = torch::zeros({N, T}, g.options());
+  auto counts = torch::zeros({N, U}, g.options());
 
   if (den.dim() == 3) {
     run_rnnt_simple_fill_grad_g(

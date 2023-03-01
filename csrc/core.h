@@ -59,12 +59,12 @@ void run_rnnt_simple_fill_grad_f(volatile float *grad_f, const float *alphas,
                                  const int *lf, const int *ly, unsigned int N,
                                  unsigned int T, unsigned int U);
 
-void run_rnnt_simple_fill_grad_g(volatile float *grad_f, unsigned int *counts,
+void run_rnnt_simple_fill_grad_g(volatile float *grad_g, unsigned int *counts,
                                  const float *alphas, const float *betas,
                                  const float *f, const float *g, const int *lf,
                                  const int *ly, unsigned int N, unsigned int T,
                                  unsigned int U);
-void run_rnnt_simple_fill_grad_g(volatile float *grad_f, unsigned int *counts,
+void run_rnnt_simple_fill_grad_g(volatile float *grad_g, unsigned int *counts,
                                  const float *alphas, const float *betas,
                                  const float *f, const float *g,
                                  const float *den, const int *lf, const int *ly,
