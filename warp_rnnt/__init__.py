@@ -301,7 +301,7 @@ def rnnt_loss_simple(
     index = labels.new_zeros((N, 1 + U))
     index[:, 1:] = labels
     # (N, T, V) -> (N, T, U)
-    f = f_enc.gather(dim=2, index=labels.unsqueeze(1).expand(-1, T, -1))
+    f = f_enc.gather(dim=2, index=index.unsqueeze(1).expand(-1, T, -1))
 
     index = labels.new_zeros((N, U + 1, 2))
     index[:, :-1, 1] = labels
