@@ -3,6 +3,7 @@ import torch.nn.functional as F
 import warp_rnnt._C as core
 from typing import *
 from pkg_resources import get_distribution
+from torch.cuda.amp import custom_fwd, custom_bwd
 
 __version__ = get_distribution("warp_rnnt").version
 
@@ -176,6 +177,7 @@ def rnnt_loss(
 
 class _RNNTLossSimple(torch.autograd.Function):
     @staticmethod
+    @custom_fwd(cast_inputs=torch.float)
     def forward(
         ctx,
         f,
@@ -211,6 +213,7 @@ class _RNNTLossSimple(torch.autograd.Function):
         return costs
 
     @staticmethod
+    @custom_bwd
     def backward(ctx, grad_costs):
         grad_costs = grad_costs.view(-1, 1, 1)
         grad_f, grad_g, grad_den = ctx.saved_tensors
@@ -229,6 +232,7 @@ class _RNNTLossSimple(torch.autograd.Function):
 
 class _LogMMExp(torch.autograd.Function):
     @staticmethod
+    @custom_fwd(cast_inputs=torch.float)
     def forward(
         ctx: Any,
         lhs: torch.Tensor,
@@ -244,6 +248,7 @@ class _LogMMExp(torch.autograd.Function):
         return mm
 
     @staticmethod
+    @custom_bwd
     def backward(ctx: Any, grad_outputs: torch.Tensor) -> Any:
         lhs, rhs, res = ctx.saved_tensors
 
@@ -287,9 +292,7 @@ def rnnt_loss_simple(
     if factor_den == 0.0:
         den = None
     else:
-        den = _LogMMExp.apply(
-            f_enc.float(), g_pred.float().transpose(1, 2), track_f, track_g
-        )
+        den = _LogMMExp.apply(f_enc, g_pred.transpose(1, 2), track_f, track_g)
         den = factor_den * den
 
     """
@@ -308,7 +311,7 @@ def rnnt_loss_simple(
     # (N, U+1, V) -> (N, U, 2)
     g = g_pred.gather(dim=2, index=index)
 
-    costs = _RNNTLossSimple.apply(f.float(), g.float(), lf, ll, track_f, track_g, den)
+    costs = _RNNTLossSimple.apply(f, g, lf, ll, track_f, track_g, den)
     if avg_length:
         costs /= lf + ll
 
