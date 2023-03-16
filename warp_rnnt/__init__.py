@@ -258,6 +258,24 @@ class _LogMMExp(torch.autograd.Function):
         return grad_lhs, grad_rhs, None, None
 
 
+def logmmexp(a: torch.Tensor, b: torch.Tensor):
+    """Log matrix multiply after exp, log(exp(a) @ exp(b))
+
+    a : (n, m, r)
+    b : (n, r, n)
+
+    return:
+        (n, m, n)
+    """
+
+    return _LogMMExp.apply(
+        a,
+        b,
+        a.requires_grad and torch.is_grad_enabled(),
+        b.requires_grad and torch.is_grad_enabled(),
+    )
+
+
 def rnnt_loss_simple(
     f_enc: torch.Tensor,
     g_pred: torch.Tensor,
@@ -266,8 +284,8 @@ def rnnt_loss_simple(
     ll: torch.Tensor,
     reduction: Literal["none", "sum", "mean"] = "mean",
     factor_den: float = 1.0,
-    avg_length: bool = False,
-):
+    return_den: bool = False,
+) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
     """CUDA-warp simple rnn-t loss with the joiner as an log-add op.
 
     Arguments:
@@ -289,11 +307,13 @@ def rnnt_loss_simple(
 
     track_f = f_enc.requires_grad and torch.is_grad_enabled()
     track_g = g_pred.requires_grad and torch.is_grad_enabled()
+    if return_den or factor_den != 0.0:
+        den = logmmexp(f_enc, g_pred.transpose(1, 2))
+
     if factor_den == 0.0:
-        den = None
+        den1 = None
     else:
-        den = _LogMMExp.apply(f_enc, g_pred.transpose(1, 2), track_f, track_g)
-        den = factor_den * den
+        den1 = den * factor_den
 
     """
     gather the target label and the blank symbol
@@ -311,17 +331,20 @@ def rnnt_loss_simple(
     # (N, U+1, V) -> (N, U, 2)
     g = g_pred.gather(dim=2, index=index)
 
-    costs = _RNNTLossSimple.apply(f, g, lf, ll, track_f, track_g, den)
-    if avg_length:
-        costs /= lf + ll
+    costs = _RNNTLossSimple.apply(f, g, lf, ll, track_f, track_g, den1)
 
     if reduction == "none" or reduction is None:
-        return costs
+        pass
     elif reduction == "sum":
-        return costs.sum(dim=0)
+        costs = costs.sum(dim=0)
     elif reduction == "mean":
-        return costs.mean(dim=0)
+        costs = costs.mean(dim=0)
     else:
         raise ValueError(
             f"Unknown reduction method: {reduction}, expected to be one of ['mean', 'sum', 'none']"
         )
+
+    if return_den:
+        return (costs, den)
+    else:
+        return costs
